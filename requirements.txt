@@ -16,3 +16,22 @@ stripe==7.11.0
 pyjwt==2.8.0
 passlib==1.7.4
 python-jose[cryptography]==3.3.0
+
+# Reliability & Performance
+tenacity==8.2.3          # Retry logic with exponential backoff
+cachetools==5.3.2        # In-memory caching
+prometheus-client==0.19.0 # Metrics and monitoring
+slowapi==0.1.9           # Rate limiting
+structlog==24.1.0        # Structured logging
+sentry-sdk[fastapi]==1.39.2  # Error tracking
+aiocache==0.12.2         # Async caching
+circuitbreaker==1.4.0    # Circuit breaker pattern
+validators==0.22.0       # Input validation
+python-dateutil==2.8.2   # Date utilities
+psutil==5.9.6            # System resource monitoring
+
+# Testing
+pytest==7.4.3            # Testing framework
+pytest-asyncio==0.21.1   # Async test support
+pytest-cov==4.1.0        # Code coverage
+pytest-mock==3.12.0      # Mocking utilities
