@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Consultant Platform - Expert Analysis Powered by Gemini</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <h1>🎯 AI Consultant Platform</h1>
+                <p class="tagline">Expert-Level Analysis • Powered by Gemini AI</p>
+            </div>
+            <div class="header-actions">
+                <div class="session-timer" id="sessionTimer">00:00:00</div>
+                <button class="btn btn-secondary" id="endSessionBtn" style="display: none;">End Session</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Mode Selection (Initial Screen) -->
+            <div id="modeSelection" class="mode-selection">
+                <h2>Select Your Expert Consultant</h2>
+                <p class="subtitle">Choose the expertise area you need. Each AI consultant is trained to provide insights worth $1000s/hour.</p>
+
+                <div class="consultant-modes" id="consultantModes">
+                    <!-- Dynamically populated -->
+                </div>
+
+                <div class="custom-instructions">
+                    <label for="customInstructions">Custom Instructions (Optional)</label>
+                    <textarea
+                        id="customInstructions"
+                        placeholder="Add specific focus areas, questions, or requirements for the AI consultant..."
+                        rows="3"
+                    ></textarea>
+                </div>
+
+                <button class="btn btn-primary btn-large" id="startSessionBtn">
+                    Start Analysis Session
+                </button>
+            </div>
+
+            <!-- Video Session (Hidden initially) -->
+            <div id="videoSession" class="video-session" style="display: none;">
+                <div class="video-grid">
+                    <!-- Video Panel -->
+                    <div class="video-panel">
+                        <div class="video-container">
+                            <video id="localVideo" autoplay muted playsinline></video>
+                            <div class="video-controls">
+                                <button class="control-btn" id="toggleVideoBtn" title="Toggle Video">
+                                    <span class="icon">📹</span>
+                                </button>
+                                <button class="control-btn" id="toggleAudioBtn" title="Toggle Audio">
+                                    <span class="icon">🎤</span>
+                                </button>
+                                <button class="control-btn" id="shareScreenBtn" title="Share Screen">
+                                    <span class="icon">🖥️</span>
+                                </button>
+                                <button class="control-btn danger" id="endCallBtn" title="End Session">
+                                    <span class="icon">📞</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="session-info">
+                            <div class="info-item">
+                                <strong>Mode:</strong> <span id="currentMode">Business</span>
+                            </div>
+                            <div class="info-item">
+                                <strong>Frames Analyzed:</strong> <span id="frameCount">0</span>
+                            </div>
+                            <div class="info-item">
+                                <strong>Insights Generated:</strong> <span id="insightCount">0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Analysis Panel -->
+                    <div class="analysis-panel">
+                        <div class="panel-header">
+                            <h3>🤖 AI Analysis & Insights</h3>
+                            <button class="btn btn-sm" id="exportReportBtn">Export Report</button>
+                        </div>
+
+                        <div class="analysis-tabs">
+                            <button class="tab-btn active" data-tab="insights">Insights</button>
+                            <button class="tab-btn" data-tab="recommendations">Recommendations</button>
+                            <button class="tab-btn" data-tab="risks">Risks</button>
+                            <button class="tab-btn" data-tab="opportunities">Opportunities</button>
+                        </div>
+
+                        <div class="tab-content active" id="insightsTab">
+                            <div class="insights-list" id="insightsList">
+                                <div class="empty-state">
+                                    <p>🎥 Start your video to begin receiving AI insights...</p>
+                                    <p class="help-text">The AI will analyze your video, screen shares, and audio in real-time.</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="tab-content" id="recommendationsTab">
+                            <div class="recommendations-list" id="recommendationsList">
+                                <div class="empty-state">
+                                    <p>No recommendations yet</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="tab-content" id="risksTab">
+                            <div class="risks-list" id="risksList">
+                                <div class="empty-state">
+                                    <p>No risks identified yet</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="tab-content" id="opportunitiesTab">
+                            <div class="opportunities-list" id="opportunitiesList">
+                                <div class="empty-state">
+                                    <p>No opportunities identified yet</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Quick Ask Section -->
+                        <div class="quick-ask">
+                            <h4>💬 Ask the AI Consultant</h4>
+                            <div class="quick-ask-input">
+                                <input
+                                    type="text"
+                                    id="quickQuestion"
+                                    placeholder="Ask a specific question about what you're showing..."
+                                />
+                                <button class="btn btn-primary" id="askBtn">Ask</button>
+                            </div>
+                            <div id="quickAnswer" class="quick-answer" style="display: none;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Items Panel -->
+                <div class="action-items-panel">
+                    <h3>📋 Action Items</h3>
+                    <div id="actionItemsList" class="action-items-list">
+                        <p class="empty-state">No action items yet</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Status Messages -->
+        <div id="statusMessages" class="status-messages"></div>
+    </div>
+
+    <!-- Loading Indicator -->
+    <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+        <div class="spinner"></div>
+        <p>Analyzing with AI...</p>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
