@@ -3,31 +3,103 @@
 {% block title %}{{ video.slug }} — Podcast Clipper{% endblock %}
 {% block body %}
   <div style="margin-bottom: 8px;"><a href="/">← Library</a></div>
-  <h2>{{ video.slug }}</h2>
+  <h2 style="margin-bottom: 4px;">{{ video.title or video.slug }}</h2>
+  <div class="muted" style="margin-bottom: 16px; font-size: 13px;">
+    {% if video.channel %}{{ video.channel }} · {% endif %}
+    {% if video.source_url %}<a href="{{ video.source_url }}" target="_blank">source</a> · {% endif %}
+    {{ video.video_path }}
+  </div>
+
+  {# ------------- EPISODE BRIEF ------------- #}
+  {% if brief %}
+  <div class="card brief">
+    <div class="row" style="margin-bottom: 10px;">
+      <div class="grow">
+        <div class="kicker">Episode brief</div>
+        <div class="clip-title" style="margin-top: 2px;">{{ brief.domain or "Strategic read" }}</div>
+        {% if brief.expert_persona %}<div class="muted" style="font-size: 12px;">Persona: {{ brief.expert_persona }}</div>{% endif %}
+      </div>
+      <button class="btn" onclick="toggleBriefEditor()">Edit brief</button>
+    </div>
+    {% if brief.summary %}<p style="margin: 4px 0 10px 0;">{{ brief.summary }}</p>{% endif %}
+
+    <div class="brief-grid">
+      {% if brief.audience %}<div><span class="kicker">Audience</span><div>{{ brief.audience }}</div></div>{% endif %}
+      {% if brief.host_style %}<div><span class="kicker">Host style</span><div>{{ brief.host_style }}</div></div>{% endif %}
+      {% if brief.guests %}<div><span class="kicker">Guests</span><div>{{ brief.guests | join(", ") }}</div></div>{% endif %}
+      {% if brief.brand_pov %}<div><span class="kicker">Brand POV</span><div>{{ brief.brand_pov }}</div></div>{% endif %}
+      {% if brief.narrative_arc %}<div><span class="kicker">Narrative arc</span><div>{{ brief.narrative_arc }}</div></div>{% endif %}
+      {% if brief.key_themes %}<div><span class="kicker">Key themes</span><div>{% for t in brief.key_themes %}<span class="tag">{{ t }}</span>{% endfor %}</div></div>{% endif %}
+    </div>
+
+    {% if brief.archetypes %}
+    <div style="margin-top: 14px;">
+      <span class="kicker">Clip archetypes</span>
+      <div class="archetypes">
+        {% for a in brief.archetypes %}
+          <div class="arch">
+            <strong>{{ a.name }}</strong>
+            <div class="muted" style="font-size: 12px;">{{ a.description }}</div>
+            {% if a.hook_pattern %}<div class="muted" style="font-size: 12px; font-style: italic;">hook: “{{ a.hook_pattern }}”</div>{% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if brief.avoid %}
+    <div style="margin-top: 12px;">
+      <span class="kicker">Avoid</span>
+      <div>{% for a in brief.avoid %}<span class="tag" style="color: var(--bad); border-color: var(--bad);">{{ a }}</span>{% endfor %}</div>
+    </div>
+    {% endif %}
+
+    {% if coverage_note %}<div class="coverage">💬 Critic coverage note: {{ coverage_note }}</div>{% endif %}
+
+    <div id="brief-editor" style="display:none; margin-top: 14px;">
+      <p class="muted" style="font-size: 12px;">Edit the brief JSON directly. Changes take effect on the next re-score.</p>
+      <textarea id="brief-json" rows="14" style="font-family: ui-monospace, monospace; font-size: 12px;"></textarea>
+      <div class="toolbar">
+        <button class="btn primary" onclick="saveBrief({{ video.id }})">Save brief</button>
+        <button class="btn" onclick="toggleBriefEditor()">Cancel</button>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card muted">No episode brief yet. Re-score to run the producer agent.</div>
+  {% endif %}
+
   <div class="card">
     <div class="row">
-      <div class="grow muted" style="font-size: 13px;">{{ video.video_path }}</div>
-      <button class="btn" onclick="rescore({{ video.id }}, '{{ video.slug|replace("'", "\\'") }}')">Re-score with preferences</button>
+      <div class="grow muted" style="font-size: 13px;">Actions</div>
+      <button class="btn" onclick="rescore({{ video.id }}, '{{ (video.title or video.slug)|replace("'", "\\'") }}')">Re-run agents</button>
       <form method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
         <label class="inline"><input type="checkbox" name="vertical"> 9:16</label>
         <label class="inline"><input type="checkbox" name="burn_captions"> captions</label>
         <button class="btn primary" type="submit">Render approved</button>
       </form>
     </div>
-    <div class="tip">Tip: adding an optional reason when you approve/reject trains the taste profile much faster.</div>
+    <div class="tip">Tip: approving/rejecting with a short reason trains the taste profile much faster.</div>
   </div>
 
   {% for c in clips %}
+    {% set pkg = packages.get(c.id) %}
+    {% set ns = namespace(archetype="") %}
+    {% for t in c.tags %}{% if t.startswith("arch:") %}{% set ns.archetype = t[5:] %}{% endif %}{% endfor %}
     <div class="card" id="clip-{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}">
       <div class="row">
         <div class="grow">
-          <div class="clip-title">{{ c.title or "Untitled" }} <span class="status {{ c.status }}" id="status-{{ c.id }}">{{ c.status }}</span></div>
+          <div class="clip-title">
+            {{ c.title or "Untitled" }}
+            <span class="status {{ c.status }}" id="status-{{ c.id }}">{{ c.status }}</span>
+            {% if ns.archetype %}<span class="tag" style="color: var(--accent); border-color: var(--accent);">{{ ns.archetype }}</span>{% endif %}
+          </div>
           <div class="clip-hook">“{{ c.hook }}”</div>
           <div class="timestamps">
             <span id="ts-{{ c.id }}">{{ c.start_sec | ts }} → {{ c.end_sec | ts }}</span>
             <span class="muted"> ({{ (c.end_sec - c.start_sec) | round(1) }}s)</span>
           </div>
-          <div>{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</div>
+          <div>{% for t in c.tags %}{% if not t.startswith("arch:") %}<span class="tag">{{ t }}</span>{% endif %}{% endfor %}</div>
         </div>
         <div style="text-align: right;">
           <div class="score">{{ c.score }}</div>
@@ -41,6 +113,76 @@
       <video controls preload="metadata"
              data-video-id="{{ video.id }}"
              src="/media/video/{{ video.id }}#t={{ c.start_sec }},{{ c.end_sec }}"></video>
+
+      {# ------------- SOCIAL PACKAGE ------------- #}
+      {% if pkg %}
+      <details class="package">
+        <summary><strong>Social package</strong> — {{ pkg.titles|length }} titles · {{ pkg.platform_captions|length }} platforms · {{ pkg.hashtags|length }} hashtags</summary>
+        <div class="pkg-body">
+          {% if pkg.titles %}
+          <div class="pkg-section">
+            <div class="kicker">Title variants</div>
+            {% for t in pkg.titles %}
+              <div class="title-variant">
+                <span class="grow">{{ t }}</span>
+                <button class="btn tiny" onclick="copyText(this, '{{ t|replace("'", "\\'") }}')">copy</button>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          {% if pkg.platform_captions %}
+          <div class="pkg-section">
+            <div class="kicker">Captions</div>
+            {% for plat, cap in pkg.platform_captions.items() %}
+              <div class="caption-block">
+                <div class="row" style="margin-bottom: 4px;">
+                  <span class="badge">{{ plat }}</span>
+                  <div class="grow"></div>
+                  <button class="btn tiny" onclick="copyText(this, document.getElementById('cap-{{ c.id }}-{{ plat }}').textContent)">copy</button>
+                </div>
+                <div class="caption" id="cap-{{ c.id }}-{{ plat }}">{{ cap }}</div>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          {% if pkg.hashtags %}
+          <div class="pkg-section">
+            <div class="kicker">Hashtags</div>
+            <div>{% for h in pkg.hashtags %}<span class="tag">#{{ h }}</span>{% endfor %}
+              <button class="btn tiny" onclick="copyText(this, '{% for h in pkg.hashtags %}#{{ h }} {% endfor %}'.trim())">copy all</button>
+            </div>
+          </div>
+          {% endif %}
+
+          {% if pkg.description %}
+          <div class="pkg-section">
+            <div class="kicker">Description</div>
+            <div>{{ pkg.description }}</div>
+          </div>
+          {% endif %}
+
+          {% if pkg.thumbnail_moment_sec is not none %}
+          <div class="pkg-section">
+            <div class="kicker">Thumbnail moment</div>
+            <div>
+              <span class="timestamps">{{ pkg.thumbnail_moment_sec | ts }}</span>
+              <button class="btn tiny" onclick="seekTo({{ c.id }}, {{ pkg.thumbnail_moment_sec }})">jump</button>
+              {% if pkg.thumbnail_reason %}<span class="muted"> — {{ pkg.thumbnail_reason }}</span>{% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if pkg.why_it_works or pkg.audience_appeal %}
+          <div class="pkg-section">
+            {% if pkg.why_it_works %}<div><span class="kicker">Why it works</span> {{ pkg.why_it_works }}</div>{% endif %}
+            {% if pkg.audience_appeal %}<div style="margin-top: 6px;"><span class="kicker">Audience</span> {{ pkg.audience_appeal }}</div>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </details>
+      {% endif %}
 
       <div class="toolbar">
         <label class="inline">Start
@@ -65,10 +207,62 @@
   {% else %}
     <div class="card muted">No clip candidates yet for this episode.</div>
   {% endfor %}
+
+<style>
+  .kicker { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 600; }
+  .brief { border-left: 3px solid var(--accent); }
+  .brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; font-size: 13px; }
+  .archetypes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
+  .arch { background: var(--panel-2); padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); }
+  .coverage { margin-top: 12px; padding: 10px 14px; background: var(--panel-2); border-left: 3px solid var(--warn); border-radius: 4px; font-size: 13px; }
+  .package { margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+  .package > summary { cursor: pointer; padding: 10px 14px; font-size: 13px; list-style: none; }
+  .package > summary::-webkit-details-marker { display: none; }
+  .package[open] > summary { border-bottom: 1px solid var(--border); }
+  .pkg-body { padding: 14px; }
+  .pkg-section { margin-bottom: 14px; }
+  .pkg-section:last-child { margin-bottom: 0; }
+  .title-variant { display: flex; align-items: center; gap: 8px; background: var(--bg); padding: 6px 10px; border-radius: 6px; margin-top: 4px; font-size: 14px; }
+  .caption-block { margin-top: 8px; }
+  .caption { background: var(--bg); padding: 8px 10px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
+  .btn.tiny { padding: 2px 8px; font-size: 11px; }
+</style>
+
+{% if brief %}
+<script id="initial-brief" type="application/json">{{ brief.to_dict() | tojson }}</script>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
+function toggleBriefEditor() {
+  const box = document.getElementById("brief-editor");
+  const ta = document.getElementById("brief-json");
+  const isHidden = box.style.display === "none";
+  if (isHidden) {
+    const el = document.getElementById("initial-brief");
+    if (el && !ta.value) ta.value = JSON.stringify(JSON.parse(el.textContent), null, 2);
+    box.style.display = "block";
+  } else {
+    box.style.display = "none";
+  }
+}
+async function saveBrief(videoId) {
+  const raw = document.getElementById("brief-json").value;
+  try { JSON.parse(raw); } catch (e) { return alert("Invalid JSON: " + e.message); }
+  await post(`/api/videos/${videoId}/brief`, { brief_json: raw });
+  location.reload();
+}
+function seekTo(clipId, sec) {
+  const v = document.querySelector(`#clip-${clipId} video`);
+  if (v) { v.currentTime = sec; v.play(); }
+}
+function copyText(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent; btn.textContent = "copied"; btn.disabled = true;
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
+  });
+}
 function reviewModal(id, action) {
   const label = action === "approve" ? "Approve" : "Reject";
   const placeholder = action === "approve"
@@ -98,8 +292,8 @@ async function submitReview(id, action) {
 function noteModal(id) {
   const body = el("div", {},
     el("h3", {}, "Add a note"),
-    el("p", { class: "muted" }, "Freeform feedback on this clip — used in future taste-profile distillations."),
-    el("textarea", { id: "note-reason", placeholder: "e.g. 'The hook is great but trim the last 4 seconds — she trails off.'" }),
+    el("p", { class: "muted" }, "Freeform feedback on this clip."),
+    el("textarea", { id: "note-reason", placeholder: "e.g. 'Great hook but trim the last 4 seconds — she trails off.'" }),
     el("div", { class: "toolbar", style: "margin-top: 12px; justify-content: flex-end;" },
       el("button", { class: "btn", onclick: () => Modal.close() }, "Cancel"),
       el("button", { class: "btn primary", onclick: () => submitNote(id) }, "Save note"),
@@ -119,7 +313,6 @@ async function saveEdits(id) {
   const end = parseFloat(document.getElementById(`end-${id}`).value);
   const title = document.getElementById(`title-${id}`).value;
   if (!(end > start)) return alert("End must be after start");
-  // Ask for an optional reason; if they cancel the prompt, still save without reason.
   const reason = prompt("Why this edit? (optional — trains your taste profile)") || "";
   await post(`/clips/${id}/update`, { start, end, title, reason });
   document.getElementById(`ts-${id}`).textContent = fmtTs(start) + " → " + fmtTs(end);
@@ -153,7 +346,7 @@ async function batchRender(evt, vid) {
 }
 async function rescore(videoId, slug) {
   const res = await post("/api/rescore", { video_id: videoId });
-  JobDrawer.watch(res.job_id, `Re-score: ${slug}`);
+  JobDrawer.watch(res.job_id, `Re-produce: ${slug}`);
 }
 </script>
 {% endblock %}

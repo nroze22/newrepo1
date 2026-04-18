@@ -1,24 +1,43 @@
 # Podcast Clipper
 
-AI scans a library of podcast videos (YouTube URLs or local files), proposes
-the most clip-worthy moments for each episode with a virality score, lets you
-review them in a web UI, and cuts the approved clips with `ffmpeg`.
+A multi-agent clipping studio for podcast creators. It ingests YouTube URLs
+or local files, runs a team of specialized AI agents over every episode —
+Producer → Scouts → Editor → Critic → Packager — and lets you review and
+cut the approved clips with `ffmpeg`.
+
+## Agent architecture
+
+- **Producer (the brain)** — reads the full episode and writes an *Episode
+  Brief*: domain, expert persona adopted for that space, narrative arc,
+  brand POV, target audience, 3–6 *clip archetypes* tailored to this
+  specific episode, and what to avoid (sponsor reads, inside refs, etc.).
+- **Coordinator** — orchestrates the pipeline, fans out scouts in parallel,
+  merges results, enforces archetype diversity, and emits live progress.
+- **Scouts** — one per transcript window, each armed with the brief. They
+  propose candidate clips aligned with the brief's archetypes.
+- **Editor** — refines the finalist set: tightens boundaries, rewrites
+  rationales, dedupes by theme, rebalances across archetypes.
+- **Critic** — final gate. Checks coverage, representation, and quality.
+  Can drop or flag clips. Writes a one-sentence coverage note.
+- **Packager** — for every finalist: 3 title variants, captions for
+  TikTok/Reels/Shorts/X/LinkedIn, hashtags, a thumbnail moment with a
+  reason, a "why it works" note, and an audience-appeal line.
 
 ## Pipeline
 
-1. **Ingest** — pull YouTube URLs (via `yt-dlp`, with auto-captions when
-   available) or local files into a workdir.
-2. **Transcribe (fallback)** — if a video lacks a transcript, extract audio
-   and call OpenAI Whisper with word-level timestamps.
-3. **Score** — Claude (with prompt-cached rubric) reads each transcript
-   window and proposes ranked clip candidates with timestamps, a title, hook,
-   rationale, virality score, and tags.
-4. **Snap** — clip boundaries snap to word-level timestamps when available so
-   cuts don't land mid-word.
-5. **Review** — FastAPI UI to preview each clip (browser streams the source
-   with HTTP Range), nudge timestamps, edit titles, and approve.
-6. **Cut** — `ffmpeg` slices the source at approved timestamps. Optional
-   9:16 vertical reformat and burned-in caption headline.
+1. **Ingest** — `yt-dlp` pulls YouTube at 1080p mp4 with uploader subs
+   preferred over auto-captions; local files are copied in; either gets
+   Whisper auto-transcription if no captions exist.
+2. **Run agents** — Producer → parallel Scouts → Editor → Critic → Packager.
+   Every stage uses prompt caching on the shared context (rubric + brief).
+3. **Snap** — clip boundaries snap to word-level timestamps so cuts don't
+   land mid-word.
+4. **Review** — web UI shows the Episode Brief at the top of each episode
+   plus every clip's full social package. Approve / reject / edit with an
+   optional reason to train a taste profile that flows back into the
+   Producer and Scouts on subsequent runs.
+5. **Cut** — `ffmpeg` slices the source at approved timestamps. Optional
+   9:16 vertical reformat and burned caption headlines.
 
 ## Install
 
@@ -96,13 +115,36 @@ library/
     ep002.json      # Whisper output with word-level timings
 ```
 
+## Models
+
+Different roles run on different tiers by default:
+
+| Role | Default model | Why |
+|------|---------------|-----|
+| Producer | `claude-opus-4-7` | Deep reading of the full episode, strategic synthesis |
+| Scout | `claude-sonnet-4-6` | Many parallel calls; needs to be fast and cheap |
+| Editor | `claude-opus-4-7` | Tight judgement on boundaries and diversity |
+| Critic | `claude-opus-4-7` | Final gate, quality and representation |
+| Packager | `claude-sonnet-4-6` | Fluent writing per clip, at volume |
+
+Override per-role via the `models` kwarg on `produce_clips`, or the `--model`
+CLI flag (which adjusts the Scout tier).
+
+## YouTube tips
+
+- Private, members-only, or age-gated videos require cookies. Export them
+  from your browser to a Netscape-format `cookies.txt` and set
+  `YT_COOKIES=/path/to/cookies.txt`.
+- Uploader subs are preferred over auto-captions; if neither exists, Whisper
+  is called automatically (needs `OPENAI_API_KEY`).
+- Downloads stream their progress into the Jobs drawer in real time.
+
 ## Notes
 
 - Whisper JSON with word-level timestamps gives the cleanest cuts.
-- The scorer uses `claude-sonnet-4-6` by default. Pass `--model` to override.
 - Long episodes are chunked into 15-minute windows with a 60 s overlap; the
-  scoring rubric is sent once per window and cached.
+  scoring rubric and episode brief are cached across windows.
 - Whisper fallback extracts mono 32 kbps mp3, splits into <24 MB chunks, and
-  merges the word-level timings with correct offsets.
+  merges word-level timings with correct offsets.
 - `ffmpeg` uses stream-copy when possible (fast, lossless). Re-encoding
   kicks in only for vertical reformat or burned captions.

@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS videos (
     video_path TEXT NOT NULL,
     transcript_path TEXT NOT NULL,
     duration REAL,
+    source_url TEXT,
+    title TEXT,
+    channel TEXT,
     scanned_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -64,6 +67,20 @@ CREATE TABLE IF NOT EXISTS preferences (
 );
 
 INSERT OR IGNORE INTO preferences (id, taste_profile) VALUES (1, '');
+
+CREATE TABLE IF NOT EXISTS episode_briefs (
+    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    brief_json TEXT NOT NULL,       -- full EpisodeBrief serialized
+    domain TEXT,
+    coverage_note TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS clip_packages (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    package_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -74,6 +91,9 @@ class VideoRow:
     video_path: str
     transcript_path: str
     duration: float | None
+    source_url: str | None = None
+    title: str | None = None
+    channel: str | None = None
 
 
 @dataclass
@@ -116,6 +136,15 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            # Migrate older DBs that predate the new columns.
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
+            for col, ddl in (
+                ("source_url", "ALTER TABLE videos ADD COLUMN source_url TEXT"),
+                ("title", "ALTER TABLE videos ADD COLUMN title TEXT"),
+                ("channel", "ALTER TABLE videos ADD COLUMN channel TEXT"),
+            ):
+                if col not in cols:
+                    conn.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -128,18 +157,31 @@ class Store:
         finally:
             conn.close()
 
-    def upsert_video(self, slug: str, video_path: Path, transcript_path: Path, duration: float) -> int:
+    def upsert_video(
+        self,
+        slug: str,
+        video_path: Path,
+        transcript_path: Path,
+        duration: float,
+        *,
+        source_url: str | None = None,
+        title: str | None = None,
+        channel: str | None = None,
+    ) -> int:
         with self._conn() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO videos (slug, video_path, transcript_path, duration)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO videos (slug, video_path, transcript_path, duration, source_url, title, channel)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(slug) DO UPDATE SET
                     video_path=excluded.video_path,
                     transcript_path=excluded.transcript_path,
-                    duration=excluded.duration
+                    duration=excluded.duration,
+                    source_url=COALESCE(excluded.source_url, videos.source_url),
+                    title=COALESCE(excluded.title, videos.title),
+                    channel=COALESCE(excluded.channel, videos.channel)
                 """,
-                (slug, str(video_path), str(transcript_path), duration),
+                (slug, str(video_path), str(transcript_path), duration, source_url, title, channel),
             )
             if cur.lastrowid:
                 return cur.lastrowid
@@ -176,7 +218,8 @@ class Store:
     def list_videos(self) -> list[VideoRow]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, slug, video_path, transcript_path, duration FROM videos ORDER BY slug"
+                "SELECT id, slug, video_path, transcript_path, duration, "
+                "source_url, title, channel FROM videos ORDER BY slug"
             ).fetchall()
         return [VideoRow(**dict(r)) for r in rows]
 
@@ -292,6 +335,52 @@ class Store:
                 "SELECT kind, COUNT(*) AS n FROM feedback GROUP BY kind"
             ).fetchall()
         return {r["kind"]: int(r["n"]) for r in rows}
+
+    def save_brief(self, video_id: int, brief: dict, *, coverage_note: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO episode_briefs (video_id, brief_json, domain, coverage_note, updated_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(video_id) DO UPDATE SET "
+                "brief_json=excluded.brief_json, domain=excluded.domain, "
+                "coverage_note=excluded.coverage_note, updated_at=CURRENT_TIMESTAMP",
+                (video_id, json.dumps(brief), brief.get("domain", ""), coverage_note),
+            )
+
+    def get_brief(self, video_id: int) -> tuple[dict | None, str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT brief_json, coverage_note FROM episode_briefs WHERE video_id = ?",
+                (video_id,),
+            ).fetchone()
+        if not row:
+            return None, ""
+        try:
+            return json.loads(row["brief_json"]), (row["coverage_note"] or "")
+        except json.JSONDecodeError:
+            return None, ""
+
+    def save_clip_package(self, clip_id: int, package: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO clip_packages (clip_id, package_json, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(clip_id) DO UPDATE SET "
+                "package_json=excluded.package_json, updated_at=CURRENT_TIMESTAMP",
+                (clip_id, json.dumps(package)),
+            )
+
+    def get_clip_package(self, clip_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT package_json FROM clip_packages WHERE clip_id = ?", (clip_id,)
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["package_json"])
+        except json.JSONDecodeError:
+            return None
 
     def get_taste_profile(self) -> str:
         with self._conn() as conn:

@@ -13,12 +13,14 @@ from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from .agents import EpisodeBrief
 from .cutter import CutOptions, cut_clip
-from .ingester import ingest_source, is_youtube_url
+from .ingester import SourceMeta, ingest_source, is_youtube_url
 from .jobs import JobContext, LogLine, manager as job_manager
 from .library import LibraryItem
 from .preferences import distill_taste_profile
-from .scorer import score_transcript
+from .produce import produce_clips
+from .scorer import ClipCandidate
 from .store import ClipRow, Store
 from .transcript import format_timestamp, parse_transcript
 
@@ -27,26 +29,61 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 TEMPLATES.env.filters["ts"] = format_timestamp
 
 
-def _score_one(store: Store, item: LibraryItem, *, model: str, max_clips: int, min_score: int, taste: str, ctx: JobContext, base: float, span: float) -> int:
+def _produce_one(
+    store: Store,
+    item: LibraryItem,
+    *,
+    meta: SourceMeta | None,
+    model: str,
+    max_clips: int,
+    min_score: int,
+    taste: str,
+    ctx: JobContext,
+    base: float,
+    span: float,
+) -> int:
+    """Run the full multi-agent pipeline on a single episode, persist everything."""
     transcript = parse_transcript(item.transcript_path)
     duration = transcript.duration
-    video_id = store.upsert_video(item.slug, item.video_path, item.transcript_path, duration)
+    video_id = store.upsert_video(
+        item.slug, item.video_path, item.transcript_path, duration,
+        source_url=(meta.source_url if meta else None),
+        title=(meta.title if meta else None),
+        channel=(meta.channel if meta else None),
+    )
 
-    def cb(done: int, total: int) -> None:
-        pct = base + span * (done / max(total, 1))
-        ctx.progress(pct, f"{item.slug}: window {done}/{total}")
+    def cb(pct: float, msg: str) -> None:
+        ctx.progress(base + span * pct, f"{item.slug}: {msg}")
 
-    clips = score_transcript(
-        transcript,
+    # Scout model defaults to the chosen `model`; others keep their opus defaults
+    # so the brain + editor + critic reason at the highest quality tier.
+    models_override = {"scout": model}
+
+    result = produce_clips(
+        transcript, meta,
         video_slug=item.slug,
-        model=model,
+        taste_profile=taste,
         max_clips=max_clips,
         min_score=min_score,
-        taste_profile=taste,
+        models=models_override,
         progress_cb=cb,
     )
-    store.replace_clips(video_id, clips)
-    ctx.info(f"{item.slug}: {len(clips)} candidates (top {max((c.score for c in clips), default=0)})")
+    # Persist clips → packages → brief. Clips first so we have IDs.
+    store.replace_clips(video_id, result.clips)
+    # Align packages with the newly-inserted clips by order (score desc from replace_clips).
+    persisted = store.list_clips(video_id=video_id)
+    for clip_row, package in zip(persisted, result.packages):
+        store.save_clip_package(clip_row.id, package.to_dict())
+    coverage = result.critic.coverage_note if result.critic else ""
+    store.save_brief(video_id, result.brief.to_dict(), coverage_note=coverage)
+
+    ctx.info(
+        f"{item.slug}: {len(result.clips)} clip(s) · "
+        f"domain={result.brief.domain or '?'} · "
+        f"archetypes={len(result.brief.archetypes)}"
+    )
+    if result.dropped_by_critic:
+        ctx.info(f"{item.slug}: critic dropped {len(result.dropped_by_critic)} clip(s)")
     return video_id
 
 
@@ -100,9 +137,29 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         if video_id not in videos:
             raise HTTPException(404, "Video not found")
         clips = store.list_clips(video_id=video_id)
+        brief_dict, coverage = store.get_brief(video_id)
+        brief = EpisodeBrief.from_dict(brief_dict) if brief_dict else None
+        packages = {c.id: store.get_clip_package(c.id) for c in clips}
         return TEMPLATES.TemplateResponse(
-            request, "video.html", {"video": videos[video_id], "clips": clips}
+            request,
+            "video.html",
+            {
+                "video": videos[video_id],
+                "clips": clips,
+                "brief": brief,
+                "packages": packages,
+                "coverage_note": coverage,
+            },
         )
+
+    @app.post("/api/videos/{video_id}/brief")
+    def save_brief(video_id: int, brief_json: str = Form(...)):
+        try:
+            data = json.loads(brief_json)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, f"Invalid JSON: {e}")
+        store.save_brief(video_id, data)
+        return {"ok": True}
 
     @app.get("/add", response_class=HTMLResponse)
     def add_page(request: Request):
@@ -150,27 +207,27 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
 
         def task(ctx: JobContext) -> dict:
             taste = store.get_taste_profile() if use_taste else ""
-            items: list[LibraryItem] = []
+            ingested: list[tuple[LibraryItem, SourceMeta]] = []
             for i, src in enumerate(sources, 1):
-                ctx.progress((i - 1) / (len(sources) * 2), f"Ingesting {src[:80]}…")
+                def ingest_prog(pct: float, msg: str, _i=i) -> None:
+                    ctx.progress(((_i - 1) + pct) / (len(sources) * 2), msg[:120])
                 kind = "YouTube" if is_youtube_url(src) else "local file"
-                ctx.info(f"[{i}/{len(sources)}] {kind}: {src[:80]}")
-                result = ingest_source(src, workdir, transcribe_if_missing=True)
-                marker = "(auto-transcribed)" if result.transcribed else "(captions found)"
-                ctx.info(f"  → {result.item.video_path.name} {marker}")
-                items.append(result.item)
+                ctx.info(f"[{i}/{len(sources)}] {kind}: {src[:100]}")
+                result = ingest_source(src, workdir, transcribe_if_missing=True, on_progress=ingest_prog)
+                caps = result.meta.captions_source or "unknown"
+                ctx.info(f"  → {result.item.video_path.name} · captions: {caps}")
+                ingested.append((result.item, result.meta))
 
-            # Second half: scoring
-            ctx.info(f"Scoring {len(items)} video(s) with {model}…")
-            for j, item in enumerate(items):
-                base = 0.5 + (j / len(items)) * 0.5
-                span = (1 / len(items)) * 0.5
-                _score_one(
-                    store, item,
+            ctx.info(f"Producing {len(ingested)} episode(s) with the agent pipeline…")
+            for j, (item, meta) in enumerate(ingested):
+                base = 0.5 + (j / len(ingested)) * 0.5
+                span = (1 / len(ingested)) * 0.5
+                _produce_one(
+                    store, item, meta=meta,
                     model=model, max_clips=max_clips, min_score=min_score,
                     taste=taste, ctx=ctx, base=base, span=span,
                 )
-            return {"count": len(items)}
+            return {"count": len(ingested)}
 
         job = job_manager.submit("ingest", label, task)
         return {"job_id": job.id}
@@ -191,9 +248,14 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
 
         def task(ctx: JobContext) -> dict:
             taste = store.get_taste_profile() if use_taste else ""
-            ctx.info(f"Re-scoring {v.slug} with taste profile={'yes' if taste else 'no'}")
-            _score_one(
-                store, item,
+            meta = SourceMeta(
+                source_url=v.source_url or "",
+                title=v.title or "",
+                channel=v.channel or "",
+            )
+            ctx.info(f"Re-producing {v.slug} · taste_profile={'yes' if taste else 'no'}")
+            _produce_one(
+                store, item, meta=meta,
                 model=model, max_clips=max_clips, min_score=min_score,
                 taste=taste, ctx=ctx, base=0.0, span=1.0,
             )

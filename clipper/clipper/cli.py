@@ -21,9 +21,9 @@ import sys
 from pathlib import Path
 
 from .cutter import CutOptions, cut_clip
-from .ingester import ingest_source
+from .ingester import IngestResult, SourceMeta, ingest_source
 from .library import LibraryItem, scan_library
-from .scorer import score_transcript
+from .produce import produce_clips
 from .server import serve
 from .store import Store
 from .transcript import parse_transcript
@@ -37,23 +37,44 @@ def _paths(workdir: Path) -> tuple[Path, Path, Path]:
     return workdir / "clipper.db", workdir / "clips", workdir / "sources"
 
 
-def _score_items(store: Store, items: list[LibraryItem], *, model: str, max_clips: int, min_score: int) -> None:
-    print(f"Scoring {len(items)} videos with model={model}…")
-    for item in items:
+def _produce_items(
+    store: Store,
+    items: list[tuple[LibraryItem, SourceMeta | None]],
+    *,
+    model: str,
+    max_clips: int,
+    min_score: int,
+) -> None:
+    print(f"Running multi-agent pipeline on {len(items)} episode(s)…")
+    for item, meta in items:
         transcript = parse_transcript(item.transcript_path)
         duration = transcript.duration
-        video_id = store.upsert_video(item.slug, item.video_path, item.transcript_path, duration)
-        print(f"  • {item.slug} ({duration/60:.1f} min) → ", end="", flush=True)
-        clips = score_transcript(
-            transcript,
-            video_slug=item.slug,
-            model=model,
-            max_clips=max_clips,
-            min_score=min_score,
+        video_id = store.upsert_video(
+            item.slug, item.video_path, item.transcript_path, duration,
+            source_url=(meta.source_url if meta else None),
+            title=(meta.title if meta else None),
+            channel=(meta.channel if meta else None),
         )
-        store.replace_clips(video_id, clips)
-        top = max((c.score for c in clips), default=0)
-        print(f"{len(clips)} candidates (top {top})")
+        print(f"  • {item.slug} ({duration/60:.1f} min)")
+
+        def progress(pct: float, msg: str) -> None:
+            print(f"    [{int(pct*100):3d}%] {msg}")
+
+        result = produce_clips(
+            transcript, meta,
+            video_slug=item.slug,
+            max_clips=max_clips, min_score=min_score,
+            models={"scout": model},
+            progress_cb=progress,
+        )
+        store.replace_clips(video_id, result.clips)
+        persisted = store.list_clips(video_id=video_id)
+        for clip_row, package in zip(persisted, result.packages):
+            store.save_clip_package(clip_row.id, package.to_dict())
+        coverage = result.critic.coverage_note if result.critic else ""
+        store.save_brief(video_id, result.brief.to_dict(), coverage_note=coverage)
+        top = max((c.score for c in result.clips), default=0)
+        print(f"    → {len(result.clips)} clip(s), top score {top}, domain={result.brief.domain or '?'}")
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -80,23 +101,27 @@ def cmd_score(args: argparse.Namespace) -> int:
         print("  Hint: run `clipper ingest <source>` first, or pass an existing library path.", file=sys.stderr)
         return 1
     store = Store(db_path)
-    _score_items(store, items, model=args.model, max_clips=args.max_clips, min_score=args.min_score)
+    _produce_items(
+        store,
+        [(i, None) for i in items],
+        model=args.model, max_clips=args.max_clips, min_score=args.min_score,
+    )
     print(f"\nDone. Review at: clipper serve --workdir {args.workdir}")
     return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Ingest one or more sources, then score. Equivalent to ingest + score."""
+    """Ingest one or more sources, then run the full agent pipeline."""
     db_path, _, _ = _paths(Path(args.workdir))
-    items: list[LibraryItem] = []
+    items: list[tuple[LibraryItem, SourceMeta | None]] = []
     for src in args.sources:
         print(f"Ingesting: {src}")
         result = ingest_source(src, Path(args.workdir), transcribe_if_missing=not args.no_transcribe)
-        marker = "(auto-transcribed)" if result.transcribed else "(captions found)"
-        print(f"  → {result.item.video_path.name} {marker}")
-        items.append(result.item)
+        caps = result.meta.captions_source or "unknown"
+        print(f"  → {result.item.video_path.name} · captions: {caps}")
+        items.append((result.item, result.meta))
     store = Store(db_path)
-    _score_items(store, items, model=args.model, max_clips=args.max_clips, min_score=args.min_score)
+    _produce_items(store, items, model=args.model, max_clips=args.max_clips, min_score=args.min_score)
     print(f"\nDone. Review at: clipper serve --workdir {args.workdir}")
     return 0
 
