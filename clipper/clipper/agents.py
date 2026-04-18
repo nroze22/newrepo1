@@ -623,6 +623,116 @@ def run_packager(
 # =============================================================================
 
 
+FAITHFULNESS_SYSTEM = """You are the FAITHFULNESS reviewer. Your only job is to protect the creator's reputation by catching clips that could misrepresent them or their guest when shown standalone on social media.
+
+For each clip you see:
+1. Its transcript text.
+2. The surrounding ~60 seconds of episode context (BEFORE and AFTER the clip boundary).
+
+You will decide a faithfulness verdict:
+- "safe"      — the clip, played alone, faithfully represents what was said and meant.
+- "risky"     — the clip is technically accurate but could be misread by a social audience (e.g. rhetorical example taken as literal claim, sarcasm mistaken for sincerity, incomplete thought).
+- "unsafe"    — the clip would misrepresent the speaker (e.g. devil's-advocate quote stated as belief, hypothetical as fact, out-of-context accusation).
+
+For every clip, return:
+- clip_index (1-based)
+- verdict (safe | risky | unsafe)
+- concern (one sentence, empty string if safe)
+- fix_hint (one sentence of how to adjust boundaries or add a caption disclaimer, if risky/unsafe; empty otherwise)
+
+Bias toward "safe" — only flag genuine misrepresentation risk, not stylistic choices. Return STRICT JSON:
+{"decisions": [{"clip_index": 1, "verdict": "safe", "concern": "", "fix_hint": ""}, ...]}
+No prose outside the JSON."""
+
+
+@dataclass
+class FaithfulnessDecision:
+    clip_index: int
+    verdict: str         # safe | risky | unsafe
+    concern: str
+    fix_hint: str
+
+
+@dataclass
+class FaithfulnessResult:
+    decisions: list[FaithfulnessDecision]
+
+
+def _context_excerpt(full_transcript: Transcript, start: float, end: float, *, window: float = 60.0) -> tuple[str, str, str]:
+    """Get the (before, during, after) transcript text around a clip range."""
+    before: list[str] = []
+    during: list[str] = []
+    after: list[str] = []
+    for seg in full_transcript.segments:
+        if seg.end < start - window:
+            continue
+        if seg.start > end + window:
+            break
+        txt = seg.text.strip()
+        if not txt:
+            continue
+        if seg.end < start:
+            before.append(txt)
+        elif seg.start > end:
+            after.append(txt)
+        else:
+            during.append(txt)
+    return " ".join(before)[-800:], " ".join(during)[:1200], " ".join(after)[:800]
+
+
+def run_faithfulness(
+    clips: list[ClipCandidate],
+    full_transcript: Transcript,
+    *,
+    client: Anthropic | None = None,
+    model: str = "claude-opus-4-7",
+) -> FaithfulnessResult:
+    if not clips:
+        return FaithfulnessResult(decisions=[])
+    client = _anthropic(client)
+    dossier: list[str] = []
+    for i, c in enumerate(clips, 1):
+        before, during, after = _context_excerpt(full_transcript, c.start, c.end)
+        dossier.append(
+            f"[{i}] {c.start:.1f}-{c.end:.1f}s\n"
+            f"    title: {c.title}\n"
+            f"    BEFORE: {before}\n"
+            f"    CLIP:   {during}\n"
+            f"    AFTER:  {after}"
+        )
+    body = "\n\n".join(dossier)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=2000,
+        system=[
+            {"type": "text", "text": FAITHFULNESS_SYSTEM, "cache_control": {"type": "ephemeral"}},
+        ],
+        messages=[{"role": "user", "content": [{"type": "text", "text": body}]}],
+    )
+    text = _coalesce_text(resp)
+    try:
+        data = _extract_json(text)
+    except ValueError:
+        return FaithfulnessResult(
+            decisions=[FaithfulnessDecision(i, "safe", "", "") for i in range(1, len(clips) + 1)]
+        )
+    decisions: list[FaithfulnessDecision] = []
+    for d in data.get("decisions", []) or []:
+        try:
+            idx = int(d.get("clip_index"))
+        except (TypeError, ValueError):
+            continue
+        verdict = str(d.get("verdict", "safe")).lower().strip()
+        if verdict not in ("safe", "risky", "unsafe"):
+            verdict = "safe"
+        decisions.append(FaithfulnessDecision(
+            clip_index=idx, verdict=verdict,
+            concern=str(d.get("concern", "")).strip()[:300],
+            fix_hint=str(d.get("fix_hint", "")).strip()[:300],
+        ))
+    return FaithfulnessResult(decisions=decisions)
+
+
 CRITIC_SYSTEM = """You are the CRITIC. You are the last gate before these clips reach the creator for approval. You see the brief and the full final set. Your job is to ensure this set:
 1. Accurately and fairly represents the episode — not a cherry-picked distortion.
 2. Delivers on the BRAND POV.

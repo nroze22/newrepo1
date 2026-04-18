@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% set active = "brand" %}
+{% block title %}Brand kit — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Brand kit</h2>
+  <div class="card">
+    <p class="muted">Defines colors, font, and logo used in animated captions and thumbnails. Set it once, applied everywhere.</p>
+    <form id="brand-form" onsubmit="return saveKit(event)" enctype="multipart/form-data">
+      <div class="brand-grid">
+        <label>Font family
+          <input type="text" name="font" value="{{ kit.font or 'Inter' }}">
+          <div class="tip">Must be installed on the render host.</div>
+        </label>
+        <label>Primary color
+          <input type="color" name="primary_color" value="{{ kit.primary_color or '#FFFFFF' }}">
+        </label>
+        <label>Accent color (active word)
+          <input type="color" name="accent_color" value="{{ kit.accent_color or '#FFD84D' }}">
+        </label>
+        <label>Shadow color
+          <input type="color" name="shadow_color" value="{{ kit.shadow_color or '#000000' }}">
+        </label>
+        <label>Outline (px)
+          <input type="number" name="outline_px" min="0" max="10" value="{{ kit.outline_px if kit.outline_px is not none else 3 }}">
+        </label>
+        <label>Shadow depth (px)
+          <input type="number" name="shadow_px" min="0" max="16" value="{{ kit.shadow_px if kit.shadow_px is not none else 2 }}">
+        </label>
+        <label>Logo position
+          <select name="logo_position">
+            {% for p in ["top_left", "top_right", "bottom_left", "bottom_right"] %}
+              <option value="{{ p }}" {% if kit.logo_position == p %}selected{% endif %}>{{ p|replace('_', ' ')|title }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Logo opacity
+          <input type="range" name="logo_opacity" min="0.1" max="1.0" step="0.05" value="{{ kit.logo_opacity or 0.85 }}">
+        </label>
+        <label class="inline"><input type="checkbox" name="uppercase" {% if kit.uppercase %}checked{% endif %}> Force uppercase in captions</label>
+        <label class="inline"><input type="checkbox" name="profanity_safe" {% if kit.profanity_safe %}checked{% endif %}> Censor profanity in captions</label>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <label>Logo (PNG with transparency recommended)
+          <input type="file" name="logo" accept="image/*">
+        </label>
+        {% if kit.logo_path %}
+          <div class="muted" style="font-size: 12px; margin-top: 6px;">
+            Current logo: <img src="/media/brand/logo" style="max-height: 48px; vertical-align: middle; margin-left: 8px; background: var(--panel-2); padding: 4px; border-radius: 4px;">
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="toolbar" style="margin-top: 20px;">
+        <button class="btn primary" type="submit">Save brand kit</button>
+      </div>
+    </form>
+  </div>
+
+  <h2 style="margin-top: 24px;">Preview</h2>
+  <div class="card" id="preview-card">
+    <div class="muted">How your active-word caption will look:</div>
+    <div class="caption-preview" id="caption-preview">
+      <span>Everyone says</span>
+      <span class="active">scaling</span>
+      <span>is the game</span>
+    </div>
+  </div>
+
+<style>
+  .brand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .brand-grid label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 6px; }
+  .brand-grid label input[type=color] { height: 38px; padding: 2px; width: 100%; }
+  .caption-preview {
+    padding: 60px 20px; text-align: center; background: linear-gradient(180deg, #1a1f2e 0%, #0b0d12 100%);
+    border-radius: 8px; margin-top: 12px;
+  }
+  .caption-preview span { font-weight: 700; font-size: 42px; }
+  .caption-preview .active { color: var(--accent); transform: scale(1.15); display: inline-block; }
+</style>
+{% endblock %}
+{% block scripts %}
+<script>
+async function saveKit(e) {
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  // Checkbox unchecked -> omitted; Form parameters need the false-case.
+  if (!form.uppercase.checked) fd.set("uppercase", "");
+  if (!form.profanity_safe.checked) fd.set("profanity_safe", "");
+  const r = await fetch("/api/brand-kit", { method: "POST", body: fd });
+  if (!r.ok) { alert(await r.text()); return false; }
+  location.reload();
+  return false;
+}
+function refreshPreview() {
+  const form = document.getElementById("brand-form");
+  const root = document.getElementById("caption-preview");
+  root.style.fontFamily = form.font.value || "Inter";
+  root.querySelectorAll("span").forEach(s => { s.style.color = form.primary_color.value; });
+  root.querySelector(".active").style.color = form.accent_color.value;
+}
+document.getElementById("brand-form").addEventListener("input", refreshPreview);
+refreshPreview();
+</script>
+{% endblock %}

@@ -17,11 +17,43 @@ cut the approved clips with `ffmpeg`.
   propose candidate clips aligned with the brief's archetypes.
 - **Editor** — refines the finalist set: tightens boundaries, rewrites
   rationales, dedupes by theme, rebalances across archetypes.
-- **Critic** — final gate. Checks coverage, representation, and quality.
-  Can drop or flag clips. Writes a one-sentence coverage note.
+- **Critic** — coverage & quality gate; drops or flags clips; writes a
+  one-sentence coverage note.
+- **Faithfulness** — reputation guardrail. For each finalist, reads ±60 s
+  of surrounding context and flags any clip that could misrepresent the
+  speaker out of context (safe / risky / unsafe with a fix hint).
 - **Packager** — for every finalist: 3 title variants, captions for
   TikTok/Reels/Shorts/X/LinkedIn, hashtags, a thumbnail moment with a
   reason, a "why it works" note, and an audience-appeal line.
+
+## Production-grade features
+
+- **Animated word-level captions** — ASS (Advanced SubStation Alpha)
+  generator with 4 bundled styles (TikTok Pop, Clean Minimal, Hype Shadow,
+  News Ticker). Uses karaoke-fill (`\\kf`) and scale-pop overrides for
+  word-by-word animation. Rendered by ffmpeg's `subtitles=` filter — native
+  quality, no bitmap artifacts.
+- **Brand kit** — persisted font, primary / accent / shadow colors,
+  outline + shadow sizing, uppercase toggle, profanity-safe mode, logo
+  with position + opacity. Flows into both captions and thumbnails.
+- **Smart 9:16 reframe** — MediaPipe Face Detection samples the clip at
+  5 fps, builds a smoothed x-center timeline, and emits an ffmpeg
+  `sendcmd` script so the `crop` filter pans smoothly with the active
+  speaker instead of center-cropping.
+- **Thumbnails** — frame-scored on face area, sharpness, exposure, and
+  Face Mesh expression proxies; generates up to four variants (plain,
+  title overlay, branded, alt moment) as JPEGs ready for upload.
+- **Semantic search** — every finalist clip is embedded with
+  `text-embedding-3-small` and stored in SQLite; natural-language search
+  across the library by meaning, not keyword.
+- **Cost estimator** — tiktoken-based pre-run estimate (one line per
+  role: producer, scouts, editor, critic, faithfulness, packager) plus
+  Whisper + embeddings.
+- **Export bundles** — one-click zip with `clip.mp4`, `captions.srt`,
+  `captions.ass`, hero + alt thumbnails, and a `metadata.json` with
+  every social package field.
+- **Speaker diarization (optional)** — install `pyannote.audio` and set
+  `HUGGINGFACE_TOKEN` to enable word-level speaker attribution.
 
 ## Pipeline
 

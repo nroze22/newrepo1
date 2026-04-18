@@ -70,29 +70,44 @@
   {% endif %}
 
   <div class="card">
-    <div class="row">
-      <div class="grow muted" style="font-size: 13px;">Actions</div>
+    <div class="row" style="flex-wrap: wrap; gap: 16px;">
+      <div class="grow muted" style="font-size: 13px;">Render options apply to every clip you render below.</div>
       <button class="btn" onclick="rescore({{ video.id }}, '{{ (video.title or video.slug)|replace("'", "\\'") }}')">Re-run agents</button>
-      <form method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
-        <label class="inline"><input type="checkbox" name="vertical"> 9:16</label>
-        <label class="inline"><input type="checkbox" name="burn_captions"> captions</label>
+      <form id="render-config" method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
+        <label class="inline"><input type="checkbox" name="vertical" id="render-vertical" checked> 9:16 vertical</label>
+        <label class="inline"><input type="checkbox" name="smart_reframe" id="render-smart" checked> smart reframe</label>
+        <label class="inline">Captions
+          <select name="caption_style" id="render-caption-style">
+            <option value="">None</option>
+            {% for s in caption_styles %}<option value="{{ s.key }}" {% if s.key == 'tiktok_pop' %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+          </select>
+        </label>
         <button class="btn primary" type="submit">Render approved</button>
       </form>
     </div>
-    <div class="tip">Tip: approving/rejecting with a short reason trains the taste profile much faster.</div>
+    <div class="tip">State-of-the-art: animated word-level captions via ASS + face-tracking vertical reframe. Approving/rejecting with a reason trains the taste profile faster.</div>
   </div>
 
   {% for c in clips %}
     {% set pkg = packages.get(c.id) %}
+    {% set fai = faithfulness.get(c.id) %}
+    {% set thumbs = thumbnails.get(c.id) %}
     {% set ns = namespace(archetype="") %}
     {% for t in c.tags %}{% if t.startswith("arch:") %}{% set ns.archetype = t[5:] %}{% endif %}{% endfor %}
     <div class="card" id="clip-{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}">
+      {% if fai and fai.verdict in ("risky", "unsafe") %}
+        <div class="faithfulness-flag {{ fai.verdict }}">
+          <strong>⚠ {{ fai.verdict|title }} — faithfulness concern:</strong> {{ fai.concern }}
+          {% if fai.fix_hint %}<div style="margin-top: 4px;"><em>Fix hint:</em> {{ fai.fix_hint }}</div>{% endif %}
+        </div>
+      {% endif %}
       <div class="row">
         <div class="grow">
           <div class="clip-title">
             {{ c.title or "Untitled" }}
             <span class="status {{ c.status }}" id="status-{{ c.id }}">{{ c.status }}</span>
             {% if ns.archetype %}<span class="tag" style="color: var(--accent); border-color: var(--accent);">{{ ns.archetype }}</span>{% endif %}
+            {% if fai and fai.verdict == "safe" %}<span class="badge" style="color: var(--good);">✓ faithful</span>{% endif %}
           </div>
           <div class="clip-hook">“{{ c.hook }}”</div>
           <div class="timestamps">
@@ -184,6 +199,17 @@
       </details>
       {% endif %}
 
+      {% if thumbs and thumbs.variants %}
+      <div class="thumb-gallery">
+        {% for v in thumbs.variants %}
+          <div class="thumb">
+            <img src="/media/thumbnail/{{ c.id }}/{{ v.style }}" alt="{{ v.style }}">
+            <div class="muted" style="font-size: 11px; text-align: center;">{{ v.style }}</div>
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       <div class="toolbar">
         <label class="inline">Start
           <input type="number" step="0.1" value="{{ '%.2f' % c.start_sec }}" id="start-{{ c.id }}" style="width: 100px;">
@@ -198,9 +224,11 @@
         <button class="btn good" onclick="reviewModal({{ c.id }}, 'approve')">Approve</button>
         <button class="btn bad" onclick="reviewModal({{ c.id }}, 'reject')">Reject</button>
         <button class="btn" onclick="noteModal({{ c.id }})">Note</button>
+        <button class="btn" onclick="makeThumbnails({{ c.id }}, event)">Generate thumbnails</button>
         <button class="btn primary" onclick="renderOne({{ c.id }}, event)">Render</button>
         {% if c.status == 'rendered' and c.output_path %}
           <a class="btn" href="/media/clip/{{ c.id }}" target="_blank">Download</a>
+          <a class="btn" href="/clips/{{ c.id }}/export" onclick="exportBundle(event, {{ c.id }})">Export bundle</a>
         {% endif %}
       </div>
     </div>
@@ -211,6 +239,12 @@
 <style>
   .kicker { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 600; }
   .brief { border-left: 3px solid var(--accent); }
+  .faithfulness-flag { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+  .faithfulness-flag.risky { background: rgba(251, 191, 36, 0.12); border-left: 3px solid var(--warn); color: #fde68a; }
+  .faithfulness-flag.unsafe { background: rgba(248, 113, 113, 0.14); border-left: 3px solid var(--bad); color: #fecaca; }
+  .thumb-gallery { display: flex; gap: 10px; overflow-x: auto; padding: 10px 0; margin: 10px 0; }
+  .thumb { flex: 0 0 auto; }
+  .thumb img { height: 120px; border-radius: 6px; border: 1px solid var(--border); background: #000; }
   .brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; font-size: 13px; }
   .archetypes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
   .arch { background: var(--panel-2); padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); }
@@ -317,11 +351,18 @@ async function saveEdits(id) {
   await post(`/clips/${id}/update`, { start, end, title, reason });
   document.getElementById(`ts-${id}`).textContent = fmtTs(start) + " → " + fmtTs(end);
 }
+function getRenderOptions() {
+  return {
+    vertical: document.getElementById("render-vertical").checked ? "true" : "",
+    smart_reframe: document.getElementById("render-smart").checked ? "true" : "",
+    caption_style: document.getElementById("render-caption-style").value || "",
+  };
+}
 async function renderOne(id, ev) {
   const btn = ev.target;
   btn.disabled = true; btn.textContent = "Rendering…";
   try {
-    await post(`/clips/${id}/render`, {});
+    await post(`/clips/${id}/render`, getRenderOptions());
     location.reload();
   } catch (e) {
     btn.disabled = false; btn.textContent = "Render";
@@ -330,19 +371,36 @@ async function renderOne(id, ev) {
 }
 async function batchRender(evt, vid) {
   evt.preventDefault();
-  const form = evt.target;
-  const data = {
-    vertical: form.vertical.checked ? "true" : "",
-    burn_captions: form.burn_captions.checked ? "true" : "",
-  };
-  const btn = form.querySelector("button");
+  const btn = evt.target.querySelector("button");
   btn.disabled = true; btn.textContent = "Rendering…";
   try {
-    const res = await post(`/videos/${vid}/render-approved`, data);
+    const res = await post(`/videos/${vid}/render-approved`, getRenderOptions());
     alert(`Rendered ${res.count} clip(s).`);
     location.reload();
   } catch (e) { alert("Render failed: " + e.message); btn.disabled = false; btn.textContent = "Render approved"; }
   return false;
+}
+async function makeThumbnails(id, ev) {
+  const btn = ev.target;
+  btn.disabled = true; btn.textContent = "Generating…";
+  try {
+    await post(`/clips/${id}/thumbnails`, { aspect: "16:9" });
+    location.reload();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Generate thumbnails";
+    alert("Thumbnail generation failed: " + e.message);
+  }
+}
+async function exportBundle(ev, id) {
+  // The anchor uses GET semantics; the server accepts POST with zip=true.
+  ev.preventDefault();
+  const r = await fetch(`/clips/${id}/export`, { method: "POST", body: new FormData() });
+  if (!r.ok) { alert(await r.text()); return; }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `clip_${id}.zip`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function rescore(videoId, slug) {
   const res = await post("/api/rescore", { video_id: videoId });

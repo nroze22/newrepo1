@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% set active = "search" %}
+{% block title %}Search — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Search your library</h2>
+  <div class="card">
+    <form onsubmit="return runSearch(event)">
+      <div style="display: flex; gap: 8px;">
+        <input type="text" name="q" id="q" placeholder="e.g. 'clips where the guest talks about habits', 'contrarian takes on scaling', 'moments of vulnerability'" style="flex: 1; font-size: 16px; padding: 10px 14px;" autofocus>
+        <button class="btn primary" type="submit">Search</button>
+      </div>
+      <div class="tip">Semantic search — finds clips by meaning, not keyword match. Uses OpenAI embeddings over title, hook, and transcript.</div>
+    </form>
+  </div>
+  <div id="results"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function runSearch(e) {
+  e.preventDefault();
+  const q = document.getElementById("q").value.trim();
+  if (!q) return false;
+  const results = document.getElementById("results");
+  results.innerHTML = '<div class="card muted">Searching…</div>';
+  try {
+    const r = await post("/api/search", { q });
+    renderHits(r.hits || [], r.note);
+  } catch (err) {
+    results.innerHTML = `<div class="card" style="color: var(--bad);">${err.message}</div>`;
+  }
+  return false;
+}
+function renderHits(hits, note) {
+  const results = document.getElementById("results");
+  if (!hits.length) {
+    results.innerHTML = `<div class="card muted">${note || "No matches yet."}</div>`;
+    return;
+  }
+  results.innerHTML = "";
+  for (const h of hits) {
+    const simPct = Math.round(h.score * 100);
+    const card = el("div", { class: "card" },
+      el("div", { class: "row" },
+        el("div", { class: "grow" },
+          el("div", { class: "clip-title" },
+            el("a", { href: `/videos/${h.video_id}#clip-${h.clip_id}` }, h.title || "Untitled"),
+            " ",
+            el("span", { class: `status ${h.status || ''}` }, h.status || "pending"),
+          ),
+          el("div", { class: "clip-hook" }, `"${h.hook || ''}"`),
+          el("div", { class: "muted", style: "font-size: 12px;" },
+            `${h.video_title} · ${h.start_sec.toFixed(1)}s → ${h.end_sec.toFixed(1)}s`),
+        ),
+        el("div", { style: "text-align: right;" },
+          el("div", { class: "score" }, `${simPct}%`),
+          el("div", { class: "muted", style: "font-size: 11px;" }, "similarity"),
+        ),
+      ),
+    );
+    results.appendChild(card);
+  }
+}
+</script>
+{% endblock %}

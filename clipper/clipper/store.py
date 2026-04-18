@@ -81,6 +81,42 @@ CREATE TABLE IF NOT EXISTS clip_packages (
     package_json TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS brand_kit (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    kit_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO brand_kit (id, kit_json) VALUES (1, '{}');
+
+CREATE TABLE IF NOT EXISTS clip_embeddings (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    source_text TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS clip_thumbnails (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    thumbnails_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS clip_faithfulness (
+    clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL,        -- safe | risky | unsafe
+    concern TEXT,
+    fix_hint TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS diarization (
+    video_id INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+    timeline_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -359,6 +395,109 @@ class Store:
             return json.loads(row["brief_json"]), (row["coverage_note"] or "")
         except json.JSONDecodeError:
             return None, ""
+
+    def save_brand_kit(self, kit: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO brand_kit (id, kit_json, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(id) DO UPDATE SET kit_json=excluded.kit_json, updated_at=CURRENT_TIMESTAMP",
+                (json.dumps(kit or {}),),
+            )
+
+    def get_brand_kit(self) -> dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT kit_json FROM brand_kit WHERE id = 1").fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row["kit_json"]) or {}
+        except json.JSONDecodeError:
+            return {}
+
+    def save_embedding(self, clip_id: int, *, model: str, vector: bytes, source_text: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO clip_embeddings (clip_id, model, vector, source_text, updated_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(clip_id) DO UPDATE SET model=excluded.model, "
+                "vector=excluded.vector, source_text=excluded.source_text, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (clip_id, model, vector, source_text[:1000]),
+            )
+
+    def list_embeddings(self) -> list[tuple[int, int, bytes]]:
+        """Return (clip_id, video_id, vector_bytes) for every embedded clip."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT e.clip_id, c.video_id, e.vector FROM clip_embeddings e "
+                "JOIN clips c ON c.id = e.clip_id"
+            ).fetchall()
+        return [(int(r["clip_id"]), int(r["video_id"]), bytes(r["vector"])) for r in rows]
+
+    def save_thumbnails(self, clip_id: int, thumbnails: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO clip_thumbnails (clip_id, thumbnails_json, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(clip_id) DO UPDATE SET thumbnails_json=excluded.thumbnails_json, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (clip_id, json.dumps(thumbnails or {})),
+            )
+
+    def get_thumbnails(self, clip_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT thumbnails_json FROM clip_thumbnails WHERE clip_id = ?", (clip_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["thumbnails_json"])
+        except json.JSONDecodeError:
+            return None
+
+    def save_faithfulness(self, clip_id: int, verdict: str, concern: str = "", fix_hint: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO clip_faithfulness (clip_id, verdict, concern, fix_hint, updated_at) "
+                "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(clip_id) DO UPDATE SET verdict=excluded.verdict, "
+                "concern=excluded.concern, fix_hint=excluded.fix_hint, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (clip_id, verdict, concern, fix_hint),
+            )
+
+    def get_faithfulness(self, clip_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT verdict, concern, fix_hint FROM clip_faithfulness WHERE clip_id = ?",
+                (clip_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {"verdict": row["verdict"], "concern": row["concern"] or "", "fix_hint": row["fix_hint"] or ""}
+
+    def save_diarization(self, video_id: int, timeline: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO diarization (video_id, timeline_json, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(video_id) DO UPDATE SET timeline_json=excluded.timeline_json, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (video_id, json.dumps(timeline or {})),
+            )
+
+    def get_diarization(self, video_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT timeline_json FROM diarization WHERE video_id = ?", (video_id,),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["timeline_json"])
+        except json.JSONDecodeError:
+            return None
 
     def save_clip_package(self, clip_id: int, package: dict) -> None:
         with self._conn() as conn:

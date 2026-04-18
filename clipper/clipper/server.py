@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -14,14 +15,19 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.templating import Jinja2Templates
 
 from .agents import EpisodeBrief
-from .cutter import CutOptions, cut_clip
+from .captions import BrandKit, CaptionStyle
+from .cost import estimate as estimate_cost
+from .cutter import CutOptions, cut_clip, render_clip
+from .export import export_clip, zip_bundle
 from .ingester import SourceMeta, ingest_source, is_youtube_url
 from .jobs import JobContext, LogLine, manager as job_manager
 from .library import LibraryItem
 from .preferences import distill_taste_profile
 from .produce import produce_clips
 from .scorer import ClipCandidate
+from . import search as search_mod
 from .store import ClipRow, Store
+from .thumbnails import generate_thumbnails
 from .transcript import format_timestamp, parse_transcript
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -70,18 +76,53 @@ def _produce_one(
     )
     # Persist clips → packages → brief. Clips first so we have IDs.
     store.replace_clips(video_id, result.clips)
-    # Align packages with the newly-inserted clips by order (score desc from replace_clips).
     persisted = store.list_clips(video_id=video_id)
+
+    # Packages, aligned by order (replace_clips preserves score-descending order).
     for clip_row, package in zip(persisted, result.packages):
         store.save_clip_package(clip_row.id, package.to_dict())
+
+    # Faithfulness verdicts
+    if result.faithfulness:
+        for d in result.faithfulness.decisions:
+            if 1 <= d.clip_index <= len(persisted):
+                clip_row = persisted[d.clip_index - 1]
+                store.save_faithfulness(clip_row.id, d.verdict, d.concern, d.fix_hint)
+
+    # Brief
     coverage = result.critic.coverage_note if result.critic else ""
     store.save_brief(video_id, result.brief.to_dict(), coverage_note=coverage)
+
+    # Embeddings — best effort, don't fail the job if the embedding API breaks.
+    try:
+        texts = [
+            search_mod.build_text_for_clip(
+                title=c.title, hook=c.hook, excerpt=c.transcript_excerpt,
+                archetype=next((t.split(":", 1)[1] for t in c.tags if t.startswith("arch:")), ""),
+            )
+            for c in persisted
+        ]
+        if texts and os.environ.get("OPENAI_API_KEY"):
+            vecs = search_mod.embed_texts(texts)
+            for clip_row, vec, txt in zip(persisted, vecs, texts):
+                store.save_embedding(
+                    clip_row.id,
+                    model=search_mod.EMBEDDING_MODEL,
+                    vector=vec.tobytes(), source_text=txt,
+                )
+            ctx.info(f"{item.slug}: embedded {len(vecs)} clip(s) for search")
+    except Exception as e:
+        ctx.warn(f"{item.slug}: embedding step skipped ({type(e).__name__})")
 
     ctx.info(
         f"{item.slug}: {len(result.clips)} clip(s) · "
         f"domain={result.brief.domain or '?'} · "
         f"archetypes={len(result.brief.archetypes)}"
     )
+    if result.faithfulness:
+        flagged = [d for d in result.faithfulness.decisions if d.verdict != "safe"]
+        if flagged:
+            ctx.info(f"{item.slug}: faithfulness flagged {len(flagged)} clip(s)")
     if result.dropped_by_critic:
         ctx.info(f"{item.slug}: critic dropped {len(result.dropped_by_critic)} clip(s)")
     return video_id
@@ -140,6 +181,8 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         brief_dict, coverage = store.get_brief(video_id)
         brief = EpisodeBrief.from_dict(brief_dict) if brief_dict else None
         packages = {c.id: store.get_clip_package(c.id) for c in clips}
+        faithfulness = {c.id: store.get_faithfulness(c.id) for c in clips}
+        thumbnails = {c.id: store.get_thumbnails(c.id) for c in clips}
         return TEMPLATES.TemplateResponse(
             request,
             "video.html",
@@ -149,6 +192,14 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
                 "brief": brief,
                 "packages": packages,
                 "coverage_note": coverage,
+                "faithfulness": faithfulness,
+                "thumbnails": thumbnails,
+                "caption_styles": [
+                    {"key": "tiktok_pop", "name": "TikTok Pop"},
+                    {"key": "clean_minimal", "name": "Clean Minimal"},
+                    {"key": "hype_shadow", "name": "Hype Shadow"},
+                    {"key": "news_ticker", "name": "News Ticker"},
+                ],
             },
         )
 
@@ -363,23 +414,56 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         store.record_feedback(clip_id=clip_id, kind="note", reason=reason)
         return JSONResponse({"ok": True})
 
+    def _opts_for(clip: ClipRow, *, vertical: bool, caption_style: str | None,
+                  burn_captions: bool, smart_reframe: bool = True) -> CutOptions:
+        kit_dict = store.get_brand_kit()
+        brand_kit = BrandKit(**{k: v for k, v in kit_dict.items() if k in BrandKit.__dataclass_fields__}) if kit_dict else BrandKit()
+        return CutOptions(
+            vertical=vertical,
+            smart_reframe=smart_reframe,
+            caption_style=caption_style or None,
+            burn_captions=burn_captions and not caption_style,
+            caption_text=clip.title or clip.hook,
+            brand_kit=brand_kit,
+            fast_copy=not (vertical or burn_captions or caption_style),
+        )
+
+    def _render_one(clip: ClipRow, *, vertical: bool, caption_style: str | None,
+                    burn_captions: bool, smart_reframe: bool = True) -> Path:
+        out = output_dir / f"{clip.video_slug}__{clip.id:04d}.mp4"
+        transcript = None
+        if caption_style:
+            videos = {v.id: v for v in store.list_videos()}
+            video = videos.get(clip.video_id)
+            if video:
+                try:
+                    transcript = parse_transcript(Path(video.transcript_path))
+                except Exception:
+                    transcript = None
+        opts = _opts_for(clip, vertical=vertical, caption_style=caption_style,
+                         burn_captions=burn_captions, smart_reframe=smart_reframe)
+        render_clip(
+            Path(clip.video_path), clip.start_sec, clip.end_sec, out,
+            transcript=transcript, opts=opts,
+        )
+        store.update_clip(clip.id, status="rendered", output_path=str(out))
+        return out
+
     @app.post("/clips/{clip_id}/render")
     def render(
         clip_id: int,
         vertical: bool = Form(False),
         burn_captions: bool = Form(False),
+        caption_style: str = Form(""),
+        smart_reframe: bool = Form(True),
     ):
         clip = store.get_clip(clip_id)
         if not clip:
             raise HTTPException(404, "Clip not found")
-        out = output_dir / f"{clip.video_slug}__{clip_id:04d}.mp4"
-        opts = CutOptions(
-            vertical=vertical, burn_captions=burn_captions,
-            fast_copy=not (vertical or burn_captions),
-            caption_text=clip.title or clip.hook,
+        out = _render_one(
+            clip, vertical=vertical, caption_style=caption_style or None,
+            burn_captions=burn_captions, smart_reframe=smart_reframe,
         )
-        cut_clip(Path(clip.video_path), clip.start_sec, clip.end_sec, out, opts)
-        store.update_clip(clip_id, status="rendered", output_path=str(out))
         return JSONResponse({"ok": True, "output": str(out)})
 
     @app.post("/videos/{video_id}/render-approved")
@@ -387,18 +471,16 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         video_id: int,
         vertical: bool = Form(False),
         burn_captions: bool = Form(False),
+        caption_style: str = Form(""),
+        smart_reframe: bool = Form(True),
     ):
         approved = [c for c in store.list_clips(video_id=video_id) if c.status == "approved"]
         rendered: list[str] = []
         for clip in approved:
-            out = output_dir / f"{clip.video_slug}__{clip.id:04d}.mp4"
-            opts = CutOptions(
-                vertical=vertical, burn_captions=burn_captions,
-                fast_copy=not (vertical or burn_captions),
-                caption_text=clip.title or clip.hook,
+            out = _render_one(
+                clip, vertical=vertical, caption_style=caption_style or None,
+                burn_captions=burn_captions, smart_reframe=smart_reframe,
             )
-            cut_clip(Path(clip.video_path), clip.start_sec, clip.end_sec, out, opts)
-            store.update_clip(clip.id, status="rendered", output_path=str(out))
             rendered.append(str(out))
         return JSONResponse({"ok": True, "rendered": rendered, "count": len(rendered)})
 
@@ -406,6 +488,155 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
     def set_prefs(taste: str = Form(...)):
         store.set_taste_profile(taste)
         return {"ok": True}
+
+    # --- Brand kit -------------------------------------------------------------
+    @app.get("/brand", response_class=HTMLResponse)
+    def brand_page(request: Request):
+        kit = store.get_brand_kit() or {}
+        return TEMPLATES.TemplateResponse(request, "brand.html", {"kit": kit})
+
+    @app.post("/api/brand-kit")
+    def save_brand_kit_api(
+        font: str = Form("Inter"),
+        primary_color: str = Form("#FFFFFF"),
+        accent_color: str = Form("#FFD84D"),
+        shadow_color: str = Form("#000000"),
+        outline_px: int = Form(3),
+        shadow_px: int = Form(2),
+        uppercase: bool = Form(False),
+        profanity_safe: bool = Form(False),
+        logo_opacity: float = Form(0.85),
+        logo_position: str = Form("top_right"),
+        logo: UploadFile | None = File(None),
+    ):
+        kit_dir = workdir / "brand"
+        kit_dir.mkdir(parents=True, exist_ok=True)
+        logo_path = None
+        if logo and logo.filename:
+            dest = kit_dir / f"logo{Path(logo.filename).suffix.lower()}"
+            with dest.open("wb") as out:
+                shutil.copyfileobj(logo.file, out)
+            logo_path = str(dest)
+        else:
+            existing = store.get_brand_kit() or {}
+            logo_path = existing.get("logo_path")
+        kit = {
+            "font": font, "primary_color": primary_color, "accent_color": accent_color,
+            "shadow_color": shadow_color, "outline_px": outline_px, "shadow_px": shadow_px,
+            "uppercase": uppercase, "profanity_safe": profanity_safe,
+            "logo_opacity": logo_opacity, "logo_position": logo_position,
+            "logo_path": logo_path,
+        }
+        store.save_brand_kit(kit)
+        return {"ok": True, "kit": kit}
+
+    @app.get("/media/brand/logo")
+    def brand_logo():
+        kit = store.get_brand_kit()
+        logo_path = (kit or {}).get("logo_path")
+        if not logo_path or not Path(logo_path).exists():
+            raise HTTPException(404, "No logo set")
+        return FileResponse(logo_path)
+
+    # --- Thumbnails ------------------------------------------------------------
+    @app.post("/clips/{clip_id}/thumbnails")
+    def generate_clip_thumbnails(clip_id: int, aspect: str = Form("16:9")):
+        clip = store.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        try:
+            w, h = [int(x) for x in aspect.split(":")]
+        except Exception:
+            w, h = 16, 9
+        kit_dict = store.get_brand_kit() or {}
+        kit = BrandKit(**{k: v for k, v in kit_dict.items() if k in BrandKit.__dataclass_fields__}) if kit_dict else BrandKit()
+        out_dir = output_dir / "thumbnails" / f"clip_{clip_id:04d}"
+        result = generate_thumbnails(
+            Path(clip.video_path), clip.start_sec, clip.end_sec,
+            title=clip.title, out_dir=out_dir, slug=f"clip_{clip_id:04d}",
+            aspect=(w, h), brand_kit=kit,
+        )
+        store.save_thumbnails(clip_id, result.to_dict())
+        return {"ok": True, "thumbnails": result.to_dict()}
+
+    @app.get("/media/thumbnail/{clip_id}/{style}")
+    def thumbnail_file(clip_id: int, style: str):
+        data = store.get_thumbnails(clip_id) or {}
+        variant = next((v for v in (data.get("variants") or []) if v.get("style") == style), None)
+        if not variant or not Path(variant["path"]).exists():
+            raise HTTPException(404, "Thumbnail not found — generate it first")
+        return FileResponse(variant["path"], media_type="image/jpeg")
+
+    # --- Semantic search -------------------------------------------------------
+    @app.get("/search", response_class=HTMLResponse)
+    def search_page(request: Request):
+        return TEMPLATES.TemplateResponse(request, "search.html", {"query": "", "hits": None})
+
+    @app.post("/api/search")
+    def search_api(q: str = Form(...), top_k: int = Form(30)):
+        if not q.strip():
+            return {"hits": [], "query": q}
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise HTTPException(400, "OPENAI_API_KEY not set — semantic search needs embeddings")
+        rows = store.list_embeddings()
+        if not rows:
+            return {"hits": [], "query": q, "note": "No embeddings yet. Re-score a video to embed its clips."}
+        import numpy as np
+        items = [(cid, vid, search_mod._unpack(blob)) for cid, vid, blob in rows]
+        qvec = search_mod.embed_one(q)
+        hits = search_mod.rank(qvec, items, top_k=top_k)
+        # Enrich hits with clip + video metadata.
+        clip_lookup = {c.id: c for c in store.list_clips()}
+        videos = {v.id: v for v in store.list_videos()}
+        out = []
+        for h in hits:
+            clip = clip_lookup.get(h.clip_id)
+            if not clip:
+                continue
+            v = videos.get(clip.video_id)
+            out.append({
+                "clip_id": h.clip_id, "video_id": h.video_id,
+                "score": round(h.score, 4),
+                "title": clip.title, "hook": clip.hook,
+                "start_sec": clip.start_sec, "end_sec": clip.end_sec,
+                "status": clip.status,
+                "video_slug": v.slug if v else "",
+                "video_title": (v.title if v else None) or (v.slug if v else ""),
+            })
+        return {"hits": out, "query": q}
+
+    # --- Cost estimate ---------------------------------------------------------
+    @app.post("/api/cost-estimate")
+    def cost_api(
+        urls: str = Form(""),
+        duration_sec: float = Form(0.0),
+        max_clips: int = Form(10),
+        model: str = Form("claude-sonnet-4-6"),
+    ):
+        # Without downloading, estimate based on duration provided by the user.
+        # (A proper "analyze this URL" would require yt-dlp metadata fetch — fast path.)
+        est = estimate_cost(
+            transcript=None,
+            duration_sec=duration_sec or 3600,
+            needs_transcription=True,
+            max_clips=max_clips,
+            models={"scout": model},
+        )
+        est_dict = est.to_dict()
+        return est_dict
+
+    # --- Export bundles --------------------------------------------------------
+    @app.post("/clips/{clip_id}/export")
+    def export_clip_api(clip_id: int, zip: bool = Form(True)):
+        bundle_dir = output_dir / "exports"
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        kit_dict = store.get_brand_kit() or {}
+        kit = BrandKit(**{k: v for k, v in kit_dict.items() if k in BrandKit.__dataclass_fields__}) if kit_dict else BrandKit()
+        bundle = export_clip(store, clip_id, out_dir=bundle_dir, brand_kit=kit)
+        if zip:
+            zip_path = zip_bundle(bundle)
+            return FileResponse(zip_path, media_type="application/zip", filename=zip_path.name)
+        return {"ok": True, "directory": str(bundle.directory), "files": [str(f) for f in bundle.files]}
 
     # --- Media streaming -------------------------------------------------------
     @app.get("/media/video/{video_id}")

@@ -6,3 +6,12 @@ python-multipart>=0.0.9
 pydantic>=2.6.0
 yt-dlp>=2024.4.0
 openai>=1.30.0
+# Phase 1: captions + reframe + thumbnails
+mediapipe>=0.10.0
+opencv-python-headless>=4.9.0
+Pillow>=10.2.0
+numpy>=1.26.0
+# Phase 2: cost + search
+tiktoken>=0.6.0
+# Optional (speaker diarization) — install manually:
+#   pip install pyannote.audio  (needs HuggingFace token + torch)

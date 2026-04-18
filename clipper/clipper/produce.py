@@ -18,8 +18,10 @@ from .agents import (
     ClipPackage,
     CriticResult,
     EpisodeBrief,
+    FaithfulnessResult,
     run_critic,
     run_editor,
+    run_faithfulness,
     run_packager,
     run_producer,
     run_scout_on_window,
@@ -35,6 +37,7 @@ MODELS = {
     "editor": "claude-opus-4-7",
     "packager": "claude-sonnet-4-6",
     "critic": "claude-opus-4-7",
+    "faithfulness": "claude-opus-4-7",
 }
 
 
@@ -44,7 +47,9 @@ class ProductionResult:
     clips: list[ClipCandidate]
     packages: list[ClipPackage]
     critic: CriticResult | None = None
-    dropped_by_critic: list[int] = field(default_factory=list)  # clip indices dropped
+    dropped_by_critic: list[int] = field(default_factory=list)
+    faithfulness: FaithfulnessResult | None = None
+    faithfulness_flags: dict[int, str] = field(default_factory=dict)  # clip id → verdict:concern
 
 
 ProgressCb = Callable[[float, str], None]
@@ -155,12 +160,32 @@ def produce_clips(
         refined = kept_clips
         _p(progress_cb, 0.85, f"Critic dropped {len(dropped)} · kept {len(refined)}")
 
-    # 5) Packager
-    _p(progress_cb, 0.87, "Packager writing titles, captions, hashtags, thumbnails…")
+    # 5) Faithfulness — the reputation guardrail
+    faithfulness_result: FaithfulnessResult | None = None
+    faithfulness_flags: dict[int, str] = {}
+    if refined:
+        _p(progress_cb, 0.84, "Faithfulness reviewer checking each clip against surrounding context…")
+        faithfulness_result = run_faithfulness(
+            refined, transcript, client=client, model=m["faithfulness"],
+        )
+        for d in faithfulness_result.decisions:
+            if 1 <= d.clip_index <= len(refined):
+                clip = refined[d.clip_index - 1]
+                if d.verdict in ("risky", "unsafe"):
+                    flag = f"[{d.verdict.upper()}] {d.concern}"
+                    clip.rationale = (clip.rationale + f" · {flag}")[:400]
+                    faithfulness_flags[d.clip_index - 1] = f"{d.verdict}:{d.concern}"
+        flagged = sum(1 for d in faithfulness_result.decisions if d.verdict != "safe")
+        _p(progress_cb, 0.86, f"Faithfulness: {flagged} clip(s) flagged for review")
+
+    # 6) Packager
+    _p(progress_cb, 0.88, "Packager writing titles, captions, hashtags, thumbnails…")
     packages = run_packager(refined, brief, client=client, model=m["packager"]) if refined else []
     _p(progress_cb, 1.0, f"Done · {len(refined)} clip(s) packaged")
 
     return ProductionResult(
         brief=brief, clips=refined, packages=packages,
         critic=critic_result, dropped_by_critic=dropped,
+        faithfulness=faithfulness_result,
+        faithfulness_flags=faithfulness_flags,
     )
