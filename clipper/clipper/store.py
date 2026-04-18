@@ -39,6 +39,31 @@ CREATE TABLE IF NOT EXISTS clips (
 
 CREATE INDEX IF NOT EXISTS idx_clips_video ON clips(video_id);
 CREATE INDEX IF NOT EXISTS idx_clips_status ON clips(status);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id INTEGER REFERENCES clips(id) ON DELETE CASCADE,
+    video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,            -- approve | reject | edit | note
+    reason TEXT,                   -- optional freeform explanation
+    original_start REAL,           -- for 'edit' feedback: original timestamps/title
+    original_end REAL,
+    original_title TEXT,
+    new_start REAL,
+    new_end REAL,
+    new_title TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_clip ON feedback(clip_id);
+
+CREATE TABLE IF NOT EXISTS preferences (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    taste_profile TEXT DEFAULT '',
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO preferences (id, taste_profile) VALUES (1, '');
 """
 
 
@@ -67,6 +92,22 @@ class ClipRow:
     output_path: str | None
     video_slug: str = ""
     video_path: str = ""
+
+
+@dataclass
+class FeedbackRow:
+    id: int
+    clip_id: int | None
+    video_id: int | None
+    kind: str
+    reason: str
+    original_start: float | None
+    original_end: float | None
+    original_title: str | None
+    new_start: float | None
+    new_end: float | None
+    new_title: str | None
+    created_at: str
 
 
 class Store:
@@ -200,6 +241,74 @@ class Store:
         params.append(clip_id)
         with self._conn() as conn:
             conn.execute(f"UPDATE clips SET {', '.join(fields)} WHERE id = ?", params)
+
+    def record_feedback(
+        self,
+        *,
+        clip_id: int | None,
+        kind: str,
+        reason: str = "",
+        original: dict | None = None,
+        new: dict | None = None,
+    ) -> int:
+        orig = original or {}
+        nw = new or {}
+        video_id = None
+        if clip_id is not None:
+            clip = self.get_clip(clip_id)
+            if clip:
+                video_id = clip.video_id
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO feedback
+                    (clip_id, video_id, kind, reason,
+                     original_start, original_end, original_title,
+                     new_start, new_end, new_title)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clip_id, video_id, kind, reason or "",
+                    orig.get("start"), orig.get("end"), orig.get("title"),
+                    nw.get("start"), nw.get("end"), nw.get("title"),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_feedback(self, *, limit: int = 500) -> list[FeedbackRow]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, clip_id, video_id, kind, reason, "
+                "original_start, original_end, original_title, "
+                "new_start, new_end, new_title, created_at "
+                "FROM feedback ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [FeedbackRow(**dict(r)) for r in rows]
+
+    def feedback_stats(self) -> dict:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT kind, COUNT(*) AS n FROM feedback GROUP BY kind"
+            ).fetchall()
+        return {r["kind"]: int(r["n"]) for r in rows}
+
+    def get_taste_profile(self) -> str:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT taste_profile FROM preferences WHERE id = 1"
+            ).fetchone()
+        return (row["taste_profile"] if row else "") or ""
+
+    def set_taste_profile(self, profile: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO preferences (id, taste_profile, updated_at) "
+                "VALUES (1, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(id) DO UPDATE SET taste_profile=excluded.taste_profile, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (profile or "",),
+            )
 
     @staticmethod
     def _row_to_clip(row: sqlite3.Row) -> ClipRow:

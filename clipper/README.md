@@ -29,19 +29,36 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...        # only needed for Whisper fallback
 ```
 
-## One-shot flow
+## Two ways to drive it
+
+**Web UI (recommended)** — open the app and drive everything from there:
 
 ```bash
-# Pull + score a mix of YouTube and local sources
-clipper run \
-    https://youtube.com/watch?v=EXAMPLE \
-    ~/podcasts/ep042.mp4
-
-# Open the review UI → approve or reject each clip
 clipper serve
 # → http://127.0.0.1:8765
+```
 
-# Headless render of everything you approved
+From the UI you can:
+
+- **Add source** — paste YouTube URLs or upload a local video; ingest +
+  transcribe + score runs as a background job with live progress.
+- **Library** — browse each episode's ranked candidates with in-place video
+  preview seeked to the clip range.
+- **Review** — approve / reject / edit each clip, optionally with a short
+  reason. Every action is captured as a feedback signal.
+- **Preferences** — distill your feedback history into a "taste profile"
+  that gets injected into future scoring prompts. You can edit it by hand.
+- **Re-score** — re-run scoring on any episode with the current taste
+  profile applied.
+- **Render** — single clips or all-approved; toggle 9:16 and burned captions.
+- **Jobs drawer** — persistent panel showing every running job with a live
+  log stream (SSE) and progress bar.
+
+**CLI** — the same flow, scriptable:
+
+```bash
+clipper run https://youtube.com/watch?v=EXAMPLE ~/podcasts/ep042.mp4
+clipper serve                          # launch the review UI
 clipper render --approved --vertical --captions
 ```
 

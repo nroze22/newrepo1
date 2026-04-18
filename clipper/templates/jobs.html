@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% set active = "jobs" %}
+{% block title %}Jobs — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Recent jobs</h2>
+  {% if not jobs %}
+    <div class="card muted">No jobs yet.</div>
+  {% endif %}
+  {% for j in jobs %}
+    <div class="card">
+      <div class="row">
+        <span class="dot {{ j.status.value }}" style="display:inline-block;"></span>
+        <div class="grow">
+          <strong>{{ j.label }}</strong>
+          <div class="muted" style="font-size: 12px;">{{ j.kind }} · job {{ j.id }} · {{ j.status.value }}</div>
+        </div>
+        <button class="btn" onclick="watchExisting('{{ j.id }}', '{{ j.label|replace("'", "\\'") }}')">Watch</button>
+      </div>
+      <div class="progress" style="margin-top: 10px;"><div style="width: {{ (j.progress * 100)|round(0) }}%"></div></div>
+      {% if j.error %}<div class="muted" style="color: var(--bad); font-size: 12px; margin-top: 6px;">{{ j.error }}</div>{% endif %}
+    </div>
+  {% endfor %}
+{% endblock %}
+{% block scripts %}
+<script>
+function watchExisting(jobId, label) { JobDrawer.watch(jobId, label); }
+</script>
+{% endblock %}

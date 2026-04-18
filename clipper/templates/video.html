@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set active = "library" %}
 {% block title %}{{ video.slug }} — Podcast Clipper{% endblock %}
 {% block body %}
   <div style="margin-bottom: 8px;"><a href="/">← Library</a></div>
@@ -6,19 +7,21 @@
   <div class="card">
     <div class="row">
       <div class="grow muted" style="font-size: 13px;">{{ video.video_path }}</div>
+      <button class="btn" onclick="rescore({{ video.id }}, '{{ video.slug|replace("'", "\\'") }}')">Re-score with preferences</button>
       <form method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
         <label class="inline"><input type="checkbox" name="vertical"> 9:16</label>
         <label class="inline"><input type="checkbox" name="burn_captions"> captions</label>
         <button class="btn primary" type="submit">Render approved</button>
       </form>
     </div>
+    <div class="tip">Tip: adding an optional reason when you approve/reject trains the taste profile much faster.</div>
   </div>
 
   {% for c in clips %}
     <div class="card" id="clip-{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}">
       <div class="row">
         <div class="grow">
-          <div class="clip-title">{{ c.title or "Untitled" }} <span class="status {{ c.status }}">{{ c.status }}</span></div>
+          <div class="clip-title">{{ c.title or "Untitled" }} <span class="status {{ c.status }}" id="status-{{ c.id }}">{{ c.status }}</span></div>
           <div class="clip-hook">“{{ c.hook }}”</div>
           <div class="timestamps">
             <span id="ts-{{ c.id }}">{{ c.start_sec | ts }} → {{ c.end_sec | ts }}</span>
@@ -50,9 +53,10 @@
           <input type="text" value="{{ c.title }}" id="title-{{ c.id }}" style="width: 280px;">
         </label>
         <button class="btn" onclick="saveEdits({{ c.id }})">Save</button>
-        <button class="btn good" onclick="setStatus({{ c.id }}, 'approve')">Approve</button>
-        <button class="btn bad" onclick="setStatus({{ c.id }}, 'reject')">Reject</button>
-        <button class="btn primary" onclick="renderOne({{ c.id }})">Render</button>
+        <button class="btn good" onclick="reviewModal({{ c.id }}, 'approve')">Approve</button>
+        <button class="btn bad" onclick="reviewModal({{ c.id }}, 'reject')">Reject</button>
+        <button class="btn" onclick="noteModal({{ c.id }})">Note</button>
+        <button class="btn primary" onclick="renderOne({{ c.id }}, event)">Render</button>
         {% if c.status == 'rendered' and c.output_path %}
           <a class="btn" href="/media/clip/{{ c.id }}" target="_blank">Download</a>
         {% endif %}
@@ -61,32 +65,67 @@
   {% else %}
     <div class="card muted">No clip candidates yet for this episode.</div>
   {% endfor %}
+{% endblock %}
 
+{% block scripts %}
 <script>
-async function post(url, data) {
-  const form = new FormData();
-  for (const [k, v] of Object.entries(data || {})) form.append(k, v);
-  const r = await fetch(url, { method: "POST", body: form });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+function reviewModal(id, action) {
+  const label = action === "approve" ? "Approve" : "Reject";
+  const placeholder = action === "approve"
+    ? "Optional: what made this clip work? (e.g. strong hook, punchy ending)"
+    : "Optional: why reject? (e.g. sponsor mention, rambles, no payoff)";
+  const body = el("div", {},
+    el("h3", {}, `${label} clip`),
+    el("p", { class: "muted" }, "Add an optional reason — this trains your taste profile."),
+    el("textarea", { id: "review-reason", placeholder }),
+    el("div", { class: "toolbar", style: "margin-top: 12px; justify-content: flex-end;" },
+      el("button", { class: "btn", onclick: () => Modal.close() }, "Cancel"),
+      el("button", { class: `btn ${action === 'approve' ? 'good' : 'bad'}`,
+                     onclick: () => submitReview(id, action) }, label),
+    ),
+  );
+  Modal.open(body);
+  setTimeout(() => document.getElementById("review-reason").focus(), 30);
 }
-async function setStatus(id, action) {
-  await post(`/clips/${id}/${action}`);
-  const card = document.getElementById(`clip-${id}`);
-  const badge = card.querySelector(".status");
+async function submitReview(id, action) {
+  const reason = document.getElementById("review-reason").value;
+  await post(`/clips/${id}/${action}`, { reason });
+  Modal.close();
+  const badge = document.getElementById(`status-${id}`);
   badge.className = "status " + (action === "approve" ? "approved" : "rejected");
   badge.textContent = action === "approve" ? "approved" : "rejected";
+}
+function noteModal(id) {
+  const body = el("div", {},
+    el("h3", {}, "Add a note"),
+    el("p", { class: "muted" }, "Freeform feedback on this clip — used in future taste-profile distillations."),
+    el("textarea", { id: "note-reason", placeholder: "e.g. 'The hook is great but trim the last 4 seconds — she trails off.'" }),
+    el("div", { class: "toolbar", style: "margin-top: 12px; justify-content: flex-end;" },
+      el("button", { class: "btn", onclick: () => Modal.close() }, "Cancel"),
+      el("button", { class: "btn primary", onclick: () => submitNote(id) }, "Save note"),
+    ),
+  );
+  Modal.open(body);
+  setTimeout(() => document.getElementById("note-reason").focus(), 30);
+}
+async function submitNote(id) {
+  const reason = document.getElementById("note-reason").value.trim();
+  if (!reason) { Modal.close(); return; }
+  await post(`/clips/${id}/note`, { reason });
+  Modal.close();
 }
 async function saveEdits(id) {
   const start = parseFloat(document.getElementById(`start-${id}`).value);
   const end = parseFloat(document.getElementById(`end-${id}`).value);
   const title = document.getElementById(`title-${id}`).value;
   if (!(end > start)) return alert("End must be after start");
-  await post(`/clips/${id}/update`, { start, end, title });
-  document.getElementById(`ts-${id}`).textContent = fmt(start) + " → " + fmt(end);
+  // Ask for an optional reason; if they cancel the prompt, still save without reason.
+  const reason = prompt("Why this edit? (optional — trains your taste profile)") || "";
+  await post(`/clips/${id}/update`, { start, end, title, reason });
+  document.getElementById(`ts-${id}`).textContent = fmtTs(start) + " → " + fmtTs(end);
 }
-async function renderOne(id) {
-  const btn = event.target;
+async function renderOne(id, ev) {
+  const btn = ev.target;
   btn.disabled = true; btn.textContent = "Rendering…";
   try {
     await post(`/clips/${id}/render`, {});
@@ -112,10 +151,9 @@ async function batchRender(evt, vid) {
   } catch (e) { alert("Render failed: " + e.message); btn.disabled = false; btn.textContent = "Render approved"; }
   return false;
 }
-function fmt(sec) {
-  sec = Math.max(0, sec);
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec - h*3600 - m*60;
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${s.toFixed(3).padStart(6,'0')}`;
+async function rescore(videoId, slug) {
+  const res = await post("/api/rescore", { video_id: videoId });
+  JobDrawer.watch(res.job_id, `Re-score: ${slug}`);
 }
 </script>
 {% endblock %}

@@ -119,24 +119,44 @@ def score_transcript(
     model: str = DEFAULT_MODEL,
     max_clips: int = 10,
     min_score: int = 70,
+    taste_profile: str = "",
+    progress_cb=None,
 ) -> list[ClipCandidate]:
-    """Ask Claude to propose clips across the full transcript, deduped and ranked."""
+    """Ask Claude to propose clips across the full transcript, deduped and ranked.
+
+    progress_cb, if provided, is called as progress_cb(done_windows, total_windows)
+    after each window finishes — used to stream progress to the review UI.
+    """
     client = client or Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
     windows = transcript.windowed(window_sec=900.0, overlap_sec=60.0) or [transcript]
 
+    system_blocks: list[dict] = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    if taste_profile.strip():
+        system_blocks.append(
+            {
+                "type": "text",
+                "text": (
+                    "TASTE PROFILE (the specific editor you're clipping for — honor these patterns):\n\n"
+                    + taste_profile.strip()
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
+
     raw: list[ClipCandidate] = []
-    for window in windows:
+    total = len(windows)
+    for idx, window in enumerate(windows, 1):
         body = _render_window(window)
         resp = client.messages.create(
             model=model,
             max_tokens=2000,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            system=system_blocks,
             messages=[
                 {
                     "role": "user",
@@ -181,6 +201,11 @@ def score_transcript(
                     transcript_excerpt=_excerpt(transcript.segments, start, end),
                 )
             )
+        if progress_cb:
+            try:
+                progress_cb(idx, total)
+            except Exception:
+                pass
 
     raw.sort(key=lambda c: c.score, reverse=True)
     return _dedupe(raw, min_score=min_score)[:max_clips]
