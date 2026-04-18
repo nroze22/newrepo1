@@ -1,4 +1,17 @@
-"""CLI: scan a library, score candidates, serve the review UI."""
+"""CLI: ingest, score, render, serve.
+
+Typical one-shot flow:
+
+    clipper run https://youtube.com/watch?v=... /path/to/episode.mp4
+    clipper serve                         # open http://127.0.0.1:8765
+    clipper render --approved             # batch-render approved clips
+
+Or broken into steps:
+
+    clipper ingest <url-or-path> ...
+    clipper score                         # defaults to <workdir>/sources
+    clipper serve
+"""
 
 from __future__ import annotations
 
@@ -7,27 +20,25 @@ import os
 import sys
 from pathlib import Path
 
-from .library import scan_library
+from .cutter import CutOptions, cut_clip
+from .ingester import ingest_source
+from .library import LibraryItem, scan_library
 from .scorer import score_transcript
 from .server import serve
 from .store import Store
 from .transcript import parse_transcript
 
 
-def _default_paths(workdir: Path) -> tuple[Path, Path]:
+def _paths(workdir: Path) -> tuple[Path, Path, Path]:
+    workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    return workdir / "clipper.db", workdir / "clips"
+    (workdir / "sources").mkdir(exist_ok=True)
+    (workdir / "clips").mkdir(exist_ok=True)
+    return workdir / "clipper.db", workdir / "clips", workdir / "sources"
 
 
-def cmd_score(args: argparse.Namespace) -> int:
-    root = Path(args.library).expanduser().resolve()
-    db_path, _ = _default_paths(Path(args.workdir))
-    items = scan_library(root)
-    if not items:
-        print(f"No videos with transcripts found under {root}", file=sys.stderr)
-        return 1
-    store = Store(db_path)
-    print(f"Found {len(items)} videos. Scoring with model={args.model}…")
+def _score_items(store: Store, items: list[LibraryItem], *, model: str, max_clips: int, min_score: int) -> None:
+    print(f"Scoring {len(items)} videos with model={model}…")
     for item in items:
         transcript = parse_transcript(item.transcript_path)
         duration = transcript.duration
@@ -36,18 +47,87 @@ def cmd_score(args: argparse.Namespace) -> int:
         clips = score_transcript(
             transcript,
             video_slug=item.slug,
-            model=args.model,
-            max_clips=args.max_clips,
-            min_score=args.min_score,
+            model=model,
+            max_clips=max_clips,
+            min_score=min_score,
         )
         store.replace_clips(video_id, clips)
-        print(f"{len(clips)} candidates (top {max((c.score for c in clips), default=0)})")
-    print(f"\nDone. Review at: python -m clipper.cli serve --workdir {args.workdir}")
+        top = max((c.score for c in clips), default=0)
+        print(f"{len(clips)} candidates (top {top})")
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    _, _, sources_dir = _paths(Path(args.workdir))
+    any_transcribed = False
+    for src in args.sources:
+        print(f"Ingesting: {src}")
+        result = ingest_source(src, Path(args.workdir), transcribe_if_missing=not args.no_transcribe)
+        any_transcribed = any_transcribed or result.transcribed
+        marker = "(auto-transcribed)" if result.transcribed else "(captions found)"
+        print(f"  → {result.item.video_path.name} + {result.item.transcript_path.name} {marker}")
+    print(f"\nIngested into: {sources_dir}")
+    if any_transcribed:
+        print("Tip: Whisper JSON with word-level timings produces the cleanest cuts.")
+    return 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    db_path, _, sources_dir = _paths(Path(args.workdir))
+    root = Path(args.library).expanduser().resolve() if args.library else sources_dir
+    items = scan_library(root)
+    if not items:
+        print(f"No videos with transcripts found under {root}", file=sys.stderr)
+        print("  Hint: run `clipper ingest <source>` first, or pass an existing library path.", file=sys.stderr)
+        return 1
+    store = Store(db_path)
+    _score_items(store, items, model=args.model, max_clips=args.max_clips, min_score=args.min_score)
+    print(f"\nDone. Review at: clipper serve --workdir {args.workdir}")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Ingest one or more sources, then score. Equivalent to ingest + score."""
+    db_path, _, _ = _paths(Path(args.workdir))
+    items: list[LibraryItem] = []
+    for src in args.sources:
+        print(f"Ingesting: {src}")
+        result = ingest_source(src, Path(args.workdir), transcribe_if_missing=not args.no_transcribe)
+        marker = "(auto-transcribed)" if result.transcribed else "(captions found)"
+        print(f"  → {result.item.video_path.name} {marker}")
+        items.append(result.item)
+    store = Store(db_path)
+    _score_items(store, items, model=args.model, max_clips=args.max_clips, min_score=args.min_score)
+    print(f"\nDone. Review at: clipper serve --workdir {args.workdir}")
+    return 0
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    db_path, output_dir, _ = _paths(Path(args.workdir))
+    store = Store(db_path)
+    status = "approved" if args.approved else None
+    clips = store.list_clips(status=status)
+    if args.video:
+        clips = [c for c in clips if c.video_slug == args.video]
+    if not clips:
+        print("No clips to render.", file=sys.stderr)
+        return 1
+    opts = CutOptions(
+        vertical=args.vertical,
+        burn_captions=args.captions,
+        fast_copy=not (args.vertical or args.captions),
+    )
+    for c in clips:
+        out = output_dir / f"{c.video_slug}__{c.id:04d}.mp4"
+        opts.caption_text = c.title or c.hook
+        print(f"  → {out.name} ({c.start_sec:.1f}-{c.end_sec:.1f}s, score={c.score})")
+        cut_clip(Path(c.video_path), c.start_sec, c.end_sec, out, opts)
+        store.update_clip(c.id, status="rendered", output_path=str(out))
+    print(f"\nRendered {len(clips)} clip(s) to {output_dir}")
     return 0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    db_path, output_dir = _default_paths(Path(args.workdir))
+    db_path, output_dir, _ = _paths(Path(args.workdir))
     print(f"Serving review UI at http://{args.host}:{args.port}")
     print(f"  db:     {db_path}")
     print(f"  output: {output_dir}")
@@ -56,26 +136,52 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    db_path, _ = _default_paths(Path(args.workdir))
+    db_path, _, _ = _paths(Path(args.workdir))
     store = Store(db_path)
     for v in store.list_videos():
         clips = store.list_clips(video_id=v.id)
-        print(f"{v.slug}: {len(clips)} clips, top={max((c.score for c in clips), default=0)}")
+        approved = sum(1 for c in clips if c.status == "approved")
+        rendered = sum(1 for c in clips if c.status == "rendered")
+        top = max((c.score for c in clips), default=0)
+        print(f"{v.slug}: {len(clips)} clips, top={top}, approved={approved}, rendered={rendered}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="clipper", description="AI podcast transcript clipper")
-    p.add_argument("--workdir", default=os.environ.get("CLIPPER_WORKDIR", ".clipper"),
-                   help="Where the SQLite db and rendered clips live (default: .clipper)")
+    p.add_argument(
+        "--workdir",
+        default=os.environ.get("CLIPPER_WORKDIR", ".clipper"),
+        help="Where sources, db, and rendered clips live (default: .clipper)",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    ps = sub.add_parser("score", help="Scan a library and score clip candidates")
-    ps.add_argument("library", help="Path to a directory of videos+transcripts")
+    pi = sub.add_parser("ingest", help="Pull YouTube URLs or local files into the workdir")
+    pi.add_argument("sources", nargs="+", help="YouTube URL(s) or local video file path(s)")
+    pi.add_argument("--no-transcribe", action="store_true", help="Don't auto-transcribe missing transcripts")
+    pi.set_defaults(func=cmd_ingest)
+
+    ps = sub.add_parser("score", help="Score clip candidates for everything in the workdir (or a given library)")
+    ps.add_argument("library", nargs="?", help="Optional library root (defaults to <workdir>/sources)")
     ps.add_argument("--model", default="claude-sonnet-4-6")
     ps.add_argument("--max-clips", type=int, default=10)
     ps.add_argument("--min-score", type=int, default=70)
     ps.set_defaults(func=cmd_score)
+
+    pr = sub.add_parser("run", help="One-shot: ingest sources AND score them")
+    pr.add_argument("sources", nargs="+", help="YouTube URL(s) or local video file path(s)")
+    pr.add_argument("--no-transcribe", action="store_true")
+    pr.add_argument("--model", default="claude-sonnet-4-6")
+    pr.add_argument("--max-clips", type=int, default=10)
+    pr.add_argument("--min-score", type=int, default=70)
+    pr.set_defaults(func=cmd_run)
+
+    prn = sub.add_parser("render", help="Render clips with ffmpeg (headless, no review UI)")
+    prn.add_argument("--approved", action="store_true", help="Only render clips marked approved")
+    prn.add_argument("--video", help="Limit to a single video slug")
+    prn.add_argument("--vertical", action="store_true", help="Crop to 9:16")
+    prn.add_argument("--captions", action="store_true", help="Burn title as caption")
+    prn.set_defaults(func=cmd_render)
 
     pv = sub.add_parser("serve", help="Launch the review UI")
     pv.add_argument("--host", default="127.0.0.1")

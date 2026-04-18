@@ -1,23 +1,24 @@
 # Podcast Clipper
 
-AI scans a library of podcast videos + transcripts, proposes the most
-clip-worthy moments for each episode with a virality score, lets you review
-them in a web UI, and cuts the approved clips with `ffmpeg`.
+AI scans a library of podcast videos (YouTube URLs or local files), proposes
+the most clip-worthy moments for each episode with a virality score, lets you
+review them in a web UI, and cuts the approved clips with `ffmpeg`.
 
 ## Pipeline
 
-1. **Scan** — recursively pair each video (`.mp4/.mov/.mkv/.webm/.m4v/.avi`)
-   with a sibling transcript (`.srt`, `.vtt`, Whisper `.json`, or `.txt`).
-2. **Score** — Claude (with prompt caching on the scoring rubric) reads each
-   transcript window and proposes ranked clip candidates with timestamps,
-   a title, hook, rationale, virality score, and tags.
-3. **Snap** — clip boundaries snap to word-level timestamps when available so
+1. **Ingest** — pull YouTube URLs (via `yt-dlp`, with auto-captions when
+   available) or local files into a workdir.
+2. **Transcribe (fallback)** — if a video lacks a transcript, extract audio
+   and call OpenAI Whisper with word-level timestamps.
+3. **Score** — Claude (with prompt-cached rubric) reads each transcript
+   window and proposes ranked clip candidates with timestamps, a title, hook,
+   rationale, virality score, and tags.
+4. **Snap** — clip boundaries snap to word-level timestamps when available so
    cuts don't land mid-word.
-4. **Review** — launch the FastAPI UI to preview each clip (the browser
-   streams the source with HTTP Range), nudge timestamps, edit titles, and
-   approve.
-5. **Cut** — `ffmpeg` slices the source at approved timestamps. Optional 9:16
-   vertical reformat and burned-in caption headline for social.
+5. **Review** — FastAPI UI to preview each clip (browser streams the source
+   with HTTP Range), nudge timestamps, edit titles, and approve.
+6. **Cut** — `ffmpeg` slices the source at approved timestamps. Optional
+   9:16 vertical reformat and burned-in caption headline.
 
 ## Install
 
@@ -25,33 +26,47 @@ them in a web UI, and cuts the approved clips with `ffmpeg`.
 pip install -r requirements.txt
 # ffmpeg must be on PATH
 export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...        # only needed for Whisper fallback
 ```
 
-## Usage
-
-Score a library:
+## One-shot flow
 
 ```bash
-python -m clipper.cli score /path/to/podcast/library
-```
+# Pull + score a mix of YouTube and local sources
+clipper run \
+    https://youtube.com/watch?v=EXAMPLE \
+    ~/podcasts/ep042.mp4
 
-Launch the review UI:
-
-```bash
-python -m clipper.cli serve
+# Open the review UI → approve or reject each clip
+clipper serve
 # → http://127.0.0.1:8765
+
+# Headless render of everything you approved
+clipper render --approved --vertical --captions
 ```
 
-In the UI, per clip you can:
+All commands respect `--workdir` (default `.clipper/`); inside it you'll find
+`sources/` (ingested videos + transcripts), `clipper.db` (candidate state),
+and `clips/` (rendered MP4s).
 
-- Preview the segment (player auto-seeks to the clip range).
-- Edit start/end (seconds) and the title.
-- Approve / Reject / Render (single clip) or render all approved at once.
-- Toggle 9:16 + burned captions when rendering.
+## Individual commands
 
-Rendered MP4s land in `.clipper/clips/`.
+```bash
+clipper ingest <url-or-path> [<url-or-path> ...]   # download + transcribe only
+clipper score [<library-dir>]                      # score workdir or an existing dir
+clipper render --approved [--vertical] [--captions]
+clipper serve [--port 8765]
+clipper list
+```
 
-## Expected library layout
+`clipper ingest` accepts:
+- **YouTube URLs** (`https://youtube.com/...`, `https://youtu.be/...`) — downloads
+  1080p mp4 and pulls the uploader's subtitles / auto-captions if available.
+- **Local video files** (`.mp4 .mov .mkv .webm .m4v .avi`) — copied into
+  `sources/`; a sibling `.srt` / `.vtt` / `.json` / `.txt` is picked up
+  automatically, or Whisper is called.
+
+## Expected local library layout
 
 Either sibling files or a `transcripts/` subfolder:
 
@@ -66,10 +81,11 @@ library/
 
 ## Notes
 
-- Whisper JSON with word-level timestamps gives the cleanest cuts. Plain
-  `.txt` works but produces only rough boundaries — prefer timed formats.
+- Whisper JSON with word-level timestamps gives the cleanest cuts.
 - The scorer uses `claude-sonnet-4-6` by default. Pass `--model` to override.
-- For very long episodes the transcript is chunked into 15-minute windows
-  with a 60 s overlap; the scoring rubric is sent once per window and cached.
+- Long episodes are chunked into 15-minute windows with a 60 s overlap; the
+  scoring rubric is sent once per window and cached.
+- Whisper fallback extracts mono 32 kbps mp3, splits into <24 MB chunks, and
+  merges the word-level timings with correct offsets.
 - `ffmpeg` uses stream-copy when possible (fast, lossless). Re-encoding
-  kicks in for vertical reformat or burned captions.
+  kicks in only for vertical reformat or burned captions.
