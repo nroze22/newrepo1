@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Library — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Library ({{ videos|length }} episodes)</h2>
+  {% if not videos %}
+    <div class="card">
+      <p class="muted">No videos indexed yet. Run <code>python -m clipper.cli score &lt;path&gt;</code> to ingest a folder.</p>
+    </div>
+  {% endif %}
+  {% for item in videos %}
+    <div class="card">
+      <div class="row">
+        <div class="grow">
+          <div class="clip-title"><a href="/videos/{{ item.video.id }}">{{ item.video.slug }}</a></div>
+          <div class="muted" style="font-size: 12px;">{{ item.video.video_path }}</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="score">{{ item.top_score }}</div>
+          <div class="muted" style="font-size: 12px;">top score</div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <span class="badge">{{ item.total }} candidates</span>
+        <span class="badge" style="color: var(--good);">{{ item.approved }} approved</span>
+        <span class="badge" style="color: var(--accent);">{{ item.rendered }} rendered</span>
+        {% if item.video.duration %}<span class="badge">{{ (item.video.duration / 60) | round(0) }} min</span>{% endif %}
+      </div>
+    </div>
+  {% endfor %}
+{% endblock %}

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}{{ video.slug }} — Podcast Clipper{% endblock %}
+{% block body %}
+  <div style="margin-bottom: 8px;"><a href="/">← Library</a></div>
+  <h2>{{ video.slug }}</h2>
+  <div class="card">
+    <div class="row">
+      <div class="grow muted" style="font-size: 13px;">{{ video.video_path }}</div>
+      <form method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
+        <label class="inline"><input type="checkbox" name="vertical"> 9:16</label>
+        <label class="inline"><input type="checkbox" name="burn_captions"> captions</label>
+        <button class="btn primary" type="submit">Render approved</button>
+      </form>
+    </div>
+  </div>
+
+  {% for c in clips %}
+    <div class="card" id="clip-{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}">
+      <div class="row">
+        <div class="grow">
+          <div class="clip-title">{{ c.title or "Untitled" }} <span class="status {{ c.status }}">{{ c.status }}</span></div>
+          <div class="clip-hook">“{{ c.hook }}”</div>
+          <div class="timestamps">
+            <span id="ts-{{ c.id }}">{{ c.start_sec | ts }} → {{ c.end_sec | ts }}</span>
+            <span class="muted"> ({{ (c.end_sec - c.start_sec) | round(1) }}s)</span>
+          </div>
+          <div>{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="score">{{ c.score }}</div>
+          <div class="muted" style="font-size: 12px;">/100</div>
+        </div>
+      </div>
+
+      <div class="clip-rationale">{{ c.rationale }}</div>
+      {% if c.transcript_excerpt %}<div class="excerpt">{{ c.transcript_excerpt }}</div>{% endif %}
+
+      <video controls preload="metadata"
+             data-video-id="{{ video.id }}"
+             src="/media/video/{{ video.id }}#t={{ c.start_sec }},{{ c.end_sec }}"></video>
+
+      <div class="toolbar">
+        <label class="inline">Start
+          <input type="number" step="0.1" value="{{ '%.2f' % c.start_sec }}" id="start-{{ c.id }}" style="width: 100px;">
+        </label>
+        <label class="inline">End
+          <input type="number" step="0.1" value="{{ '%.2f' % c.end_sec }}" id="end-{{ c.id }}" style="width: 100px;">
+        </label>
+        <label class="inline">Title
+          <input type="text" value="{{ c.title }}" id="title-{{ c.id }}" style="width: 280px;">
+        </label>
+        <button class="btn" onclick="saveEdits({{ c.id }})">Save</button>
+        <button class="btn good" onclick="setStatus({{ c.id }}, 'approve')">Approve</button>
+        <button class="btn bad" onclick="setStatus({{ c.id }}, 'reject')">Reject</button>
+        <button class="btn primary" onclick="renderOne({{ c.id }})">Render</button>
+        {% if c.status == 'rendered' and c.output_path %}
+          <a class="btn" href="/media/clip/{{ c.id }}" target="_blank">Download</a>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <div class="card muted">No clip candidates yet for this episode.</div>
+  {% endfor %}
+
+<script>
+async function post(url, data) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(data || {})) form.append(k, v);
+  const r = await fetch(url, { method: "POST", body: form });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function setStatus(id, action) {
+  await post(`/clips/${id}/${action}`);
+  const card = document.getElementById(`clip-${id}`);
+  const badge = card.querySelector(".status");
+  badge.className = "status " + (action === "approve" ? "approved" : "rejected");
+  badge.textContent = action === "approve" ? "approved" : "rejected";
+}
+async function saveEdits(id) {
+  const start = parseFloat(document.getElementById(`start-${id}`).value);
+  const end = parseFloat(document.getElementById(`end-${id}`).value);
+  const title = document.getElementById(`title-${id}`).value;
+  if (!(end > start)) return alert("End must be after start");
+  await post(`/clips/${id}/update`, { start, end, title });
+  document.getElementById(`ts-${id}`).textContent = fmt(start) + " → " + fmt(end);
+}
+async function renderOne(id) {
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = "Rendering…";
+  try {
+    await post(`/clips/${id}/render`, {});
+    location.reload();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Render";
+    alert("Render failed: " + e.message);
+  }
+}
+async function batchRender(evt, vid) {
+  evt.preventDefault();
+  const form = evt.target;
+  const data = {
+    vertical: form.vertical.checked ? "true" : "",
+    burn_captions: form.burn_captions.checked ? "true" : "",
+  };
+  const btn = form.querySelector("button");
+  btn.disabled = true; btn.textContent = "Rendering…";
+  try {
+    const res = await post(`/videos/${vid}/render-approved`, data);
+    alert(`Rendered ${res.count} clip(s).`);
+    location.reload();
+  } catch (e) { alert("Render failed: " + e.message); btn.disabled = false; btn.textContent = "Render approved"; }
+  return false;
+}
+function fmt(sec) {
+  sec = Math.max(0, sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec - h*3600 - m*60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${s.toFixed(3).padStart(6,'0')}`;
+}
+</script>
+{% endblock %}

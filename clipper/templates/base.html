@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}Podcast Clipper{% endblock %}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #151822;
+    --panel-2: #1d2230;
+    --border: #2a2f3d;
+    --text: #e8eaf0;
+    --muted: #8a93a6;
+    --accent: #ff5b7a;
+    --good: #4ade80;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--border); display: flex;
+           align-items: center; justify-content: space-between; background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
+  header nav a { margin-left: 18px; color: var(--muted); font-size: 14px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px; }
+  h2 { margin: 0 0 14px 0; font-size: 16px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+       letter-spacing: 0.08em; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px;
+          margin-bottom: 14px; }
+  .row { display: flex; gap: 14px; align-items: center; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .tag { display: inline-block; background: var(--panel-2); border: 1px solid var(--border); padding: 2px 8px;
+         border-radius: 999px; font-size: 11px; color: var(--muted); margin-right: 4px; }
+  .score { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 8px 14px;
+         border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #1a0008; font-weight: 600; }
+  .btn.good { color: var(--good); border-color: var(--good); }
+  .btn.bad { color: var(--bad); border-color: var(--bad); }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+            border: 1px solid var(--border); color: var(--muted); }
+  .status.approved { color: var(--good); border-color: var(--good); }
+  .status.rejected { color: var(--bad); border-color: var(--bad); }
+  .status.rendered { color: var(--accent); border-color: var(--accent); }
+  input, select { background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+                  padding: 6px 10px; border-radius: 6px; font: inherit; }
+  .clip-title { font-weight: 600; font-size: 16px; margin: 0 0 4px 0; }
+  .clip-hook { font-style: italic; color: var(--muted); margin: 0 0 8px 0; }
+  .clip-rationale { color: var(--muted); font-size: 13px; margin: 6px 0; }
+  .timestamps { font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  video { width: 100%; max-width: 640px; border-radius: 8px; background: #000; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .excerpt { background: var(--panel-2); border-left: 3px solid var(--accent); padding: 10px 14px;
+             border-radius: 4px; font-size: 14px; margin: 10px 0; }
+  .badge { background: var(--panel-2); padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+  label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Podcast Clipper</h1>
+  <nav><a href="/">Library</a></nav>
+</header>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>
