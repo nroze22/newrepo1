@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% set active = "integrations" %}
+{% block title %}Integrations — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Postiz (scheduled publishing)</h2>
+  <div class="card">
+    <p class="muted">
+      Publishing is delegated to <a href="https://postiz.com/" target="_blank">Postiz</a>, a mature open-source
+      social media scheduler. Postiz handles OAuth per platform, rate limits, retries, the calendar UI, and
+      per-post analytics. We hand it the rendered clip plus the per-platform captions our Packager agent wrote.
+    </p>
+    <p class="tip">
+      Self-host Postiz (<code>docker compose up</code>), connect your channels in its UI, then paste its URL
+      and an API key from <em>Settings → Developers → Public API</em> below.
+    </p>
+
+    <form onsubmit="return savePostiz(event)">
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px;">
+        <label class="inline" style="flex-direction: column; align-items: stretch; gap: 6px;">
+          <span class="kicker">Postiz base URL</span>
+          <input type="text" name="base_url" id="postiz-url" value="{{ cfg.base_url or '' }}"
+                 placeholder="https://postiz.your-domain.com">
+        </label>
+        <label class="inline" style="flex-direction: column; align-items: stretch; gap: 6px;">
+          <span class="kicker">API key</span>
+          <input type="password" name="api_key" id="postiz-key"
+                 placeholder="{{ '••••••••  (stored)' if cfg.api_key else 'paste API key' }}">
+        </label>
+      </div>
+      <div class="toolbar" style="margin-top: 14px;">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn" type="button" onclick="testConnection()">Test + refresh channels</button>
+      </div>
+    </form>
+  </div>
+
+  <h2 style="margin-top: 24px;">Connected channels <span class="muted" style="font-weight: normal; font-size: 12px; text-transform: none; letter-spacing: 0;">({{ integrations|length }})</span></h2>
+  {% if not integrations %}
+    <div class="card muted">No channels yet. Save your credentials, then click <em>Test + refresh channels</em>.</div>
+  {% else %}
+    <div class="channel-grid">
+      {% for i in integrations %}
+        <div class="channel {% if i.disabled %}disabled{% endif %}">
+          {% if i.picture %}<img src="{{ i.picture }}" alt="">{% else %}<div class="avatar">{{ i.provider[:2]|upper }}</div>{% endif %}
+          <div class="grow">
+            <div style="font-weight: 600;">{{ i.name or i.provider }}</div>
+            <div class="muted" style="font-size: 12px;">{{ i.provider }}</div>
+          </div>
+          {% if i.disabled %}<span class="status rejected">disabled</span>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+<style>
+  .channel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .channel { display: flex; gap: 12px; align-items: center; padding: 12px 14px; background: var(--panel);
+             border: 1px solid var(--border); border-radius: 10px; }
+  .channel.disabled { opacity: 0.5; }
+  .channel img { width: 38px; height: 38px; border-radius: 999px; object-fit: cover; background: var(--panel-2); }
+  .channel .avatar { width: 38px; height: 38px; border-radius: 999px; background: var(--panel-2); display: flex;
+                     align-items: center; justify-content: center; font-size: 12px; color: var(--muted); font-weight: 700; }
+</style>
+{% endblock %}
+{% block scripts %}
+<script>
+async function savePostiz(e) {
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  if (!fd.get("api_key")) fd.delete("api_key");  // keep stored key when blank
+  const r = await fetch("/api/postiz/config", { method: "POST", body: fd });
+  if (!r.ok) { alert(await r.text()); return false; }
+  alert("Saved.");
+  return false;
+}
+async function testConnection() {
+  const r = await fetch("/api/postiz/test", { method: "POST" });
+  if (!r.ok) { alert("Failed: " + await r.text()); return; }
+  const data = await r.json();
+  alert(`Connected · ${data.count} channel(s) found.`);
+  location.reload();
+}
+</script>
+{% endblock %}

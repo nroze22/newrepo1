@@ -54,6 +54,14 @@ cut the approved clips with `ffmpeg`.
   every social package field.
 - **Speaker diarization (optional)** — install `pyannote.audio` and set
   `HUGGINGFACE_TOKEN` to enable word-level speaker attribution.
+- **Scheduled publishing via Postiz** — hand off to the open-source
+  [Postiz](https://github.com/gitroomhq/postiz-app) scheduler for X,
+  LinkedIn, YouTube, TikTok, Instagram, Threads, Bluesky, Mastodon,
+  Pinterest, Facebook, Reddit, Discord. Self-host Postiz, paste its URL
+  and API key on the Integrations page, then every rendered clip gets a
+  **Schedule ↗** button. The Packager's per-platform captions pre-fill the
+  post composer; media uploads once and fans out to every picked channel
+  in a single batched API call (respects Postiz's 30 req/hr limit).
 
 ## Pipeline
 

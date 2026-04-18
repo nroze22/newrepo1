@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS diarization (
     timeline_json TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS postiz_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    base_url TEXT DEFAULT '',
+    api_key TEXT DEFAULT '',
+    integrations_json TEXT DEFAULT '[]',
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO postiz_config (id, base_url, api_key) VALUES (1, '', '');
+
+CREATE TABLE IF NOT EXISTS scheduled_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    integration_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    postiz_post_id TEXT,
+    status TEXT NOT NULL,          -- scheduled | draft | published | error
+    scheduled_at TEXT,
+    content TEXT,
+    error TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sched_clip ON scheduled_posts(clip_id);
 """
 
 
@@ -395,6 +420,80 @@ class Store:
             return json.loads(row["brief_json"]), (row["coverage_note"] or "")
         except json.JSONDecodeError:
             return None, ""
+
+    # ---- Postiz -------------------------------------------------------------
+
+    def get_postiz_config(self) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT base_url, api_key, integrations_json FROM postiz_config WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return {"base_url": "", "api_key": "", "integrations": []}
+        try:
+            integrations = json.loads(row["integrations_json"] or "[]")
+        except json.JSONDecodeError:
+            integrations = []
+        return {
+            "base_url": row["base_url"] or "",
+            "api_key": row["api_key"] or "",
+            "integrations": integrations,
+        }
+
+    def save_postiz_config(self, *, base_url: str, api_key: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO postiz_config (id, base_url, api_key, updated_at) "
+                "VALUES (1, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "base_url=excluded.base_url, api_key=excluded.api_key, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (base_url or "", api_key or ""),
+            )
+
+    def save_postiz_integrations(self, integrations: list[dict]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE postiz_config SET integrations_json = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = 1",
+                (json.dumps(integrations or []),),
+            )
+
+    def record_scheduled_post(
+        self,
+        *,
+        clip_id: int,
+        integration_id: str,
+        provider: str,
+        postiz_post_id: str | None,
+        status: str,
+        scheduled_at: str | None,
+        content: str = "",
+        error: str = "",
+    ) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO scheduled_posts "
+                "(clip_id, integration_id, provider, postiz_post_id, status, scheduled_at, content, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (clip_id, integration_id, provider, postiz_post_id, status, scheduled_at, content, error),
+            )
+            return int(cur.lastrowid)
+
+    def list_scheduled_posts(self, *, clip_id: int | None = None) -> list[dict]:
+        query = "SELECT * FROM scheduled_posts"
+        params: list = []
+        if clip_id is not None:
+            query += " WHERE clip_id = ?"
+            params.append(clip_id)
+        query += " ORDER BY id DESC"
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_scheduled_post(self, id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (id,))
 
     def save_brand_kit(self, kit: dict) -> None:
         with self._conn() as conn:

@@ -178,7 +178,7 @@
           </div>
           {% endif %}
 
-          {% if pkg.thumbnail_moment_sec is not none %}
+          {% if pkg.thumbnail_moment_sec is defined and pkg.thumbnail_moment_sec is not none %}
           <div class="pkg-section">
             <div class="kicker">Thumbnail moment</div>
             <div>
@@ -229,8 +229,24 @@
         {% if c.status == 'rendered' and c.output_path %}
           <a class="btn" href="/media/clip/{{ c.id }}" target="_blank">Download</a>
           <a class="btn" href="/clips/{{ c.id }}/export" onclick="exportBundle(event, {{ c.id }})">Export bundle</a>
+          <button class="btn primary" onclick="scheduleModal({{ c.id }})">Schedule ↗</button>
         {% endif %}
       </div>
+
+      {% set sched = schedules.get(c.id) %}
+      {% if sched %}
+      <div class="schedules">
+        {% for s in sched %}
+          <div class="schedule">
+            <span class="tag" style="color: var(--accent); border-color: var(--accent);">{{ s.provider or "—" }}</span>
+            <span class="status {{ s.status }}">{{ s.status }}</span>
+            {% if s.scheduled_at %}<span class="muted" style="font-size: 12px;">{{ s.scheduled_at }}</span>{% endif %}
+            <span class="grow muted" style="font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ s.content[:120] or '' }}</span>
+            <button class="btn tiny bad" onclick="cancelSchedule({{ s.id }}, event)">Cancel</button>
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
   {% else %}
     <div class="card muted">No clip candidates yet for this episode.</div>
@@ -245,6 +261,13 @@
   .thumb-gallery { display: flex; gap: 10px; overflow-x: auto; padding: 10px 0; margin: 10px 0; }
   .thumb { flex: 0 0 auto; }
   .thumb img { height: 120px; border-radius: 6px; border: 1px solid var(--border); background: #000; }
+  .schedules { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .schedule { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--panel-2);
+              border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+  .sched-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin: 12px 0; }
+  .sched-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .sched-card.sel { border-color: var(--accent); }
+  .sched-card textarea { width: 100%; min-height: 72px; margin-top: 6px; font-family: inherit; font-size: 13px; }
   .brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; font-size: 13px; }
   .archetypes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
   .arch { background: var(--panel-2); padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); }
@@ -265,6 +288,8 @@
 {% if brief %}
 <script id="initial-brief" type="application/json">{{ brief.to_dict() | tojson }}</script>
 {% endif %}
+<script id="postiz-state" type="application/json">{{ {"configured": postiz_configured, "integrations": postiz_integrations} | tojson }}</script>
+<script id="clip-packages" type="application/json">{{ packages_by_id | tojson }}</script>
 {% endblock %}
 
 {% block scripts %}
@@ -401,6 +426,115 @@ async function exportBundle(ev, id) {
   const a = document.createElement("a");
   a.href = url; a.download = `clip_${id}.zip`; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// --- Postiz scheduling -----------------------------------------------------
+const PostizState = JSON.parse(document.getElementById("postiz-state").textContent || "{}");
+const ClipPackages = JSON.parse(document.getElementById("clip-packages").textContent || "{}");
+
+function defaultCaptionFor(clipId, provider) {
+  const pkg = ClipPackages[clipId] || {};
+  const captions = pkg.platform_captions || {};
+  const map = {
+    x: ["x", "twitter"], twitter: ["x", "twitter"],
+    linkedin: ["linkedin"], tiktok: ["tiktok"],
+    instagram: ["instagram", "reels"], reels: ["instagram", "reels"],
+    youtube: ["shorts", "youtube"], shorts: ["shorts", "youtube"],
+    threads: ["threads"], bluesky: ["bluesky", "x"],
+    facebook: ["facebook"], pinterest: ["pinterest"],
+  };
+  const keys = map[provider] || [provider];
+  for (const k of keys) if (captions[k]) return captions[k];
+  return pkg.description || "";
+}
+
+function scheduleModal(clipId) {
+  if (!PostizState.configured) {
+    if (confirm("Postiz isn't connected yet. Open Integrations page?")) location.href = "/integrations";
+    return;
+  }
+  const integrations = (PostizState.integrations || []).filter(i => !i.disabled);
+  if (!integrations.length) {
+    alert("No Postiz channels connected. Open Postiz and connect at least one.");
+    return;
+  }
+  const nowLocal = new Date(Date.now() + 60 * 60 * 1000);
+  const whenStr = nowLocal.toISOString().slice(0, 16);
+
+  const grid = el("div", { class: "sched-grid" });
+  for (const i of integrations) {
+    const caption = defaultCaptionFor(clipId, (i.provider || "").toLowerCase());
+    const textarea = el("textarea", { "data-integration-id": i.id, placeholder: "Caption for this channel" });
+    textarea.value = caption;
+    const label = el("label", { class: "row" },
+      el("input", { type: "checkbox", "data-integration-id": i.id, checked: caption ? "" : null }),
+      el("div", { class: "grow" },
+        el("strong", {}, i.name || i.provider),
+        el("div", { class: "muted", style: "font-size: 11px;" }, i.provider),
+      ),
+    );
+    grid.appendChild(el("div", { class: "sched-card" }, label, textarea));
+  }
+
+  const whenInput = el("input", { type: "datetime-local", value: whenStr, id: "sched-when" });
+  const kindSelect = el("select", { id: "sched-kind" },
+    el("option", { value: "schedule", selected: "" }, "Schedule"),
+    el("option", { value: "now" }, "Post now"),
+    el("option", { value: "draft" }, "Save as draft"),
+  );
+  const body = el("div", {},
+    el("h3", {}, "Schedule to Postiz"),
+    el("p", { class: "muted" }, "Tick the channels to post to, edit each caption, then pick a time."),
+    grid,
+    el("div", { class: "row", style: "gap: 12px; margin-top: 10px;" },
+      el("label", { class: "inline" }, "When ", whenInput),
+      el("label", { class: "inline" }, "Kind ", kindSelect),
+    ),
+    el("div", { class: "toolbar", style: "justify-content: flex-end; margin-top: 14px;" },
+      el("button", { class: "btn", onclick: () => Modal.close() }, "Cancel"),
+      el("button", { class: "btn primary", onclick: () => submitSchedule(clipId) }, "Send to Postiz"),
+    ),
+  );
+  Modal.open(body);
+}
+
+async function submitSchedule(clipId) {
+  const checks = document.querySelectorAll("#modal input[type=checkbox][data-integration-id]");
+  const ids = []; const captions = {};
+  for (const cb of checks) {
+    if (!cb.checked) continue;
+    const id = cb.getAttribute("data-integration-id");
+    ids.push(id);
+    const ta = document.querySelector(`#modal textarea[data-integration-id="${id}"]`);
+    captions[id] = ta ? ta.value : "";
+  }
+  if (!ids.length) return alert("Pick at least one channel.");
+  const kind = document.getElementById("sched-kind").value;
+  const whenLocal = document.getElementById("sched-when").value;
+  const whenIso = whenLocal ? new Date(whenLocal).toISOString() : "";
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = "Sending…";
+  try {
+    const res = await post(`/clips/${clipId}/schedule`, {
+      integration_ids: ids.join(","),
+      captions_json: JSON.stringify(captions),
+      kind, when: whenIso,
+    });
+    Modal.close();
+    alert(`Scheduled ${res.scheduled.length} post(s).`);
+    location.reload();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Send to Postiz";
+    alert("Schedule failed: " + e.message);
+  }
+}
+
+async function cancelSchedule(id, ev) {
+  ev.preventDefault();
+  if (!confirm("Cancel this scheduled post (on Postiz too)?")) return;
+  const r = await fetch(`/api/schedules/${id}`, { method: "DELETE" });
+  if (!r.ok) { alert("Failed: " + await r.text()); return; }
+  location.reload();
 }
 async function rescore(videoId, slug) {
   const res = await post("/api/rescore", { video_id: videoId });

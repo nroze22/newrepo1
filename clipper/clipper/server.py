@@ -8,6 +8,7 @@ import mimetypes
 import os
 import shutil
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
@@ -22,6 +23,10 @@ from .export import export_clip, zip_bundle
 from .ingester import SourceMeta, ingest_source, is_youtube_url
 from .jobs import JobContext, LogLine, manager as job_manager
 from .library import LibraryItem
+from .postiz import (
+    PostizClient, PostizConfig, PostizError, ScheduleSpec,
+    summarize_schedule_response,
+)
 from .preferences import distill_taste_profile
 from .produce import produce_clips
 from .scorer import ClipCandidate
@@ -183,6 +188,9 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         packages = {c.id: store.get_clip_package(c.id) for c in clips}
         faithfulness = {c.id: store.get_faithfulness(c.id) for c in clips}
         thumbnails = {c.id: store.get_thumbnails(c.id) for c in clips}
+        schedules = {c.id: store.list_scheduled_posts(clip_id=c.id) for c in clips}
+        packages_by_id = {str(c.id): (packages.get(c.id) or {}) for c in clips}
+        postiz_cfg = store.get_postiz_config()
         return TEMPLATES.TemplateResponse(
             request,
             "video.html",
@@ -194,6 +202,10 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
                 "coverage_note": coverage,
                 "faithfulness": faithfulness,
                 "thumbnails": thumbnails,
+                "schedules": schedules,
+                "postiz_integrations": postiz_cfg.get("integrations") or [],
+                "postiz_configured": bool(postiz_cfg.get("base_url") and postiz_cfg.get("api_key")),
+                "packages_by_id": packages_by_id,
                 "caption_styles": [
                     {"key": "tiktok_pop", "name": "TikTok Pop"},
                     {"key": "clean_minimal", "name": "Clean Minimal"},
@@ -637,6 +649,157 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
             zip_path = zip_bundle(bundle)
             return FileResponse(zip_path, media_type="application/zip", filename=zip_path.name)
         return {"ok": True, "directory": str(bundle.directory), "files": [str(f) for f in bundle.files]}
+
+    # --- Postiz integration (scheduled publishing) -----------------------------
+    def _postiz_client() -> PostizClient:
+        cfg = store.get_postiz_config()
+        return PostizClient(PostizConfig(base_url=cfg["base_url"], api_key=cfg["api_key"]))
+
+    @app.get("/integrations", response_class=HTMLResponse)
+    def integrations_page(request: Request):
+        cfg = store.get_postiz_config()
+        return TEMPLATES.TemplateResponse(
+            request,
+            "integrations.html",
+            {"cfg": cfg, "integrations": cfg.get("integrations") or []},
+        )
+
+    @app.post("/api/postiz/config")
+    def save_postiz(base_url: str = Form(""), api_key: str | None = Form(None)):
+        existing = store.get_postiz_config()
+        new_key = api_key if api_key is not None else existing.get("api_key") or ""
+        store.save_postiz_config(base_url=base_url.strip(), api_key=(new_key or "").strip())
+        return {"ok": True}
+
+    @app.post("/api/postiz/test")
+    def test_postiz():
+        client = _postiz_client()
+        if not client.config.valid():
+            raise HTTPException(400, "Postiz URL + API key required.")
+        try:
+            integrations = client.list_integrations()
+        except PostizError as e:
+            raise HTTPException(400, f"Postiz test failed ({e.status or 'network'}): {e}") from e
+        # Cache the channel list so the UI can show icons immediately.
+        store.save_postiz_integrations([asdict(i) for i in integrations])
+        return {"ok": True, "count": len(integrations),
+                "integrations": [asdict(i) for i in integrations]}
+
+    @app.post("/clips/{clip_id}/schedule")
+    def schedule_clip(
+        clip_id: int,
+        integration_ids: str = Form(...),   # comma-separated
+        captions_json: str = Form("{}"),    # {"<integration_id>": "caption text", ...}
+        kind: str = Form("schedule"),       # schedule | draft | now
+        when: str = Form(""),               # ISO8601, UTC preferred
+    ):
+        clip = store.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        if not clip.output_path or not Path(clip.output_path).exists():
+            raise HTTPException(400, "Clip must be rendered before scheduling.")
+
+        client = _postiz_client()
+        if not client.config.valid():
+            raise HTTPException(400, "Configure Postiz first (Integrations page).")
+
+        try:
+            caption_map = json.loads(captions_json) if captions_json else {}
+        except json.JSONDecodeError:
+            raise HTTPException(400, "captions_json is not valid JSON")
+        wanted_ids = [i for i in (integration_ids or "").split(",") if i.strip()]
+        if not wanted_ids:
+            raise HTTPException(400, "Pick at least one channel.")
+
+        # Resolve integrations with providers from the cached list (falls back to re-fetch).
+        cached = store.get_postiz_config().get("integrations") or []
+        integration_by_id = {str(i.get("id")): i for i in cached}
+        if not all(i in integration_by_id for i in wanted_ids):
+            fresh = client.list_integrations()
+            store.save_postiz_integrations([asdict(x) for x in fresh])
+            integration_by_id = {i.id: {"id": i.id, "provider": i.provider} for i in fresh}
+
+        # Upload media once.
+        try:
+            upload = client.upload_media(Path(clip.output_path))
+        except PostizError as e:
+            raise HTTPException(502, f"Postiz upload failed: {e}") from e
+        upload_id = str(upload.get("id") or "")
+        upload_path = str(upload.get("path") or "")
+
+        # Resolve schedule time.
+        when_dt = None
+        if kind == "schedule":
+            if not when:
+                raise HTTPException(400, "Schedule requires 'when' (ISO datetime).")
+            try:
+                when_dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+            except ValueError as e:
+                raise HTTPException(400, f"Bad 'when' date: {e}") from e
+
+        pkg = store.get_clip_package(clip_id) or {}
+        default_caption_map = pkg.get("platform_captions") or {}
+
+        specs: list[ScheduleSpec] = []
+        for integ_id in wanted_ids:
+            info = integration_by_id.get(integ_id) or {}
+            provider = str(info.get("provider") or "").lower()
+            content = (
+                caption_map.get(integ_id)
+                or default_caption_map.get(provider)
+                or clip.title or clip.hook or "New clip"
+            )
+            specs.append(ScheduleSpec(integration_id=integ_id, provider=provider, content=str(content)))
+
+        try:
+            resp = client.schedule_posts(
+                specs=specs,
+                media_upload_id=upload_id or None,
+                media_path=upload_path or None,
+                when=when_dt,
+                kind=kind,
+            )
+        except PostizError as e:
+            raise HTTPException(502, f"Postiz schedule failed: {e}") from e
+
+        # Record what we scheduled.
+        results = summarize_schedule_response(resp)
+        recorded: list[dict] = []
+        for spec in specs:
+            matched = next((r for r in results if r.integration_id == spec.integration_id), None)
+            row_id = store.record_scheduled_post(
+                clip_id=clip_id,
+                integration_id=spec.integration_id,
+                provider=spec.provider,
+                postiz_post_id=(matched.postiz_post_id if matched else None),
+                status=(matched.status if matched else kind),
+                scheduled_at=(matched.scheduled_at if matched else (when_dt.isoformat() if when_dt else None)),
+                content=spec.content,
+            )
+            recorded.append({
+                "id": row_id, "integration_id": spec.integration_id,
+                "provider": spec.provider, "status": (matched.status if matched else kind),
+            })
+        return {"ok": True, "scheduled": recorded}
+
+    @app.get("/api/clips/{clip_id}/schedules")
+    def list_clip_schedules(clip_id: int):
+        return {"scheduled": store.list_scheduled_posts(clip_id=clip_id)}
+
+    @app.delete("/api/schedules/{row_id}")
+    def cancel_schedule(row_id: int):
+        rows = [r for r in store.list_scheduled_posts() if r["id"] == row_id]
+        if not rows:
+            raise HTTPException(404, "Scheduled post not found.")
+        row = rows[0]
+        client = _postiz_client()
+        if row.get("postiz_post_id") and client.config.valid():
+            try:
+                client.delete_post(row["postiz_post_id"])
+            except PostizError:
+                pass
+        store.delete_scheduled_post(row_id)
+        return {"ok": True}
 
     # --- Media streaming -------------------------------------------------------
     @app.get("/media/video/{video_id}")
