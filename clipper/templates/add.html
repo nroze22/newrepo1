@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% set active = "add" %}
+{% block title %}Add source — Podcast Clipper{% endblock %}
+{% block body %}
+  <h2>Add a source</h2>
+  <div class="card">
+    <form id="ingest-form" onsubmit="return submitIngest(event)">
+      <label class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .08em;">YouTube URLs (one per line)</label>
+      <textarea name="urls" rows="5" placeholder="https://youtu.be/...&#10;https://youtube.com/watch?v=..."></textarea>
+      <div class="tip">Each URL is downloaded in 1080p mp4 with auto-captions when available.</div>
+
+      <div style="margin-top: 18px;">
+        <label class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .08em;">Or upload a local file</label>
+        <input type="file" name="file" accept="video/*" style="display: block; margin-top: 6px;">
+        <div class="tip">If there's no sibling transcript (.srt/.vtt/.json/.txt), the file will be auto-transcribed with Whisper.</div>
+      </div>
+
+      <div style="margin-top: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+        <label class="inline">Model
+          <select name="model">
+            <option value="claude-sonnet-4-6" selected>claude-sonnet-4-6 (default)</option>
+            <option value="claude-opus-4-7">claude-opus-4-7 (highest quality)</option>
+            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (fastest)</option>
+          </select>
+        </label>
+        <label class="inline">Max clips per episode
+          <input type="number" name="max_clips" value="10" min="1" max="30">
+        </label>
+        <label class="inline">Min score
+          <input type="number" name="min_score" value="70" min="0" max="100">
+        </label>
+        <label class="inline"><input type="checkbox" name="use_taste" checked> Use taste profile</label>
+      </div>
+
+      <div class="toolbar" style="margin-top: 20px;">
+        <button class="btn" type="button" onclick="estimateCost()">Estimate cost</button>
+        <button class="btn primary" type="submit">Start ingest + score</button>
+        <span class="muted tip" style="margin-left: 8px;">Progress streams into the Jobs drawer →</span>
+      </div>
+      <div id="cost-box" style="display: none; margin-top: 14px;"></div>
+    </form>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function submitIngest(e) {
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  if (!form.use_taste.checked) fd.set("use_taste", "");
+  const r = await fetch("/api/ingest", { method: "POST", body: fd });
+  if (!r.ok) { alert(await r.text()); return false; }
+  const { job_id } = await r.json();
+  JobDrawer.watch(job_id, "Ingest + score");
+  form.reset();
+  return false;
+}
+async function estimateCost() {
+  const form = document.getElementById("ingest-form");
+  const urls = (form.urls.value || "").split("\n").filter(u => u.trim()).length;
+  const duration = prompt("Approximate total duration in minutes (for the cost estimate)?", "60");
+  if (duration == null) return;
+  const minutes = Math.max(1, parseFloat(duration) || 60);
+  const fd = new FormData();
+  fd.set("duration_sec", (minutes * 60) * Math.max(1, urls));
+  fd.set("max_clips", form.max_clips.value);
+  fd.set("model", form.model.value);
+  const r = await fetch("/api/cost-estimate", { method: "POST", body: fd });
+  const data = await r.json();
+  const rows = data.roles.map(role =>
+    `<tr><td>${role.role}</td><td class="muted">${role.model}</td><td style="text-align:right;">${role.calls}</td>`
+    + `<td style="text-align:right;">$${role.cost_usd.toFixed(3)}</td></tr>`).join("");
+  const box = document.getElementById("cost-box");
+  box.style.display = "block";
+  box.innerHTML = `
+    <div class="card" style="background: var(--panel-2);">
+      <div class="row"><strong class="grow">Estimated cost</strong><span class="score">$${data.total_usd.toFixed(2)}</span></div>
+      <table style="width:100%; font-size: 13px; margin-top: 8px; border-collapse: collapse;">
+        <thead><tr style="color: var(--muted); text-align: left;"><th>Role</th><th>Model</th><th style="text-align:right;">Calls</th><th style="text-align:right;">$</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div class="tip">Includes Whisper ($${data.whisper_usd.toFixed(3)}) + embeddings ($${data.embedding_usd.toFixed(3)}). Rough — actuals depend on cache hit rate.</div>
+    </div>`;
+}
+</script>
+{% endblock %}

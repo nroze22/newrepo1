@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}Podcast Clipper{% endblock %}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #151822;
+    --panel-2: #1d2230;
+    --border: #2a2f3d;
+    --text: #e8eaf0;
+    --muted: #8a93a6;
+    --accent: #ff5b7a;
+    --accent-soft: #ff5b7a22;
+    --good: #4ade80;
+    --bad: #f87171;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { padding: 16px 28px; border-bottom: 1px solid var(--border); display: flex;
+           align-items: center; gap: 24px; background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: 0.3px; }
+  header nav { display: flex; gap: 18px; margin-left: 24px; }
+  header nav a { color: var(--muted); font-size: 14px; padding: 4px 2px; border-bottom: 2px solid transparent; }
+  header nav a.active { color: var(--text); border-bottom-color: var(--accent); }
+  header .spacer { flex: 1; }
+  header .job-pill { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 12px;
+                     background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
+                     font-size: 12px; color: var(--muted); }
+  header .job-pill:hover { border-color: var(--accent); color: var(--text); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.running { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+  .dot.succeeded { background: var(--good); }
+  .dot.failed { background: var(--bad); }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+
+  main { max-width: 1100px; margin: 0 auto; padding: 28px; }
+  h2 { margin: 0 0 14px 0; font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+       letter-spacing: 0.08em; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px;
+          margin-bottom: 14px; }
+  .row { display: flex; gap: 14px; align-items: center; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .tag { display: inline-block; background: var(--panel-2); border: 1px solid var(--border); padding: 2px 8px;
+         border-radius: 999px; font-size: 11px; color: var(--muted); margin-right: 4px; }
+  .score { font-size: 22px; font-weight: 700; color: var(--accent); }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 8px 14px;
+         border-radius: 8px; cursor: pointer; font-size: 13px; transition: border-color .15s, transform .05s; }
+  .btn:hover { border-color: var(--accent); }
+  .btn:active { transform: scale(0.98); }
+  .btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #1a0008; font-weight: 600; }
+  .btn.good { color: var(--good); border-color: var(--good); }
+  .btn.bad { color: var(--bad); border-color: var(--bad); }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+            border: 1px solid var(--border); color: var(--muted); }
+  .status.approved { color: var(--good); border-color: var(--good); }
+  .status.rejected { color: var(--bad); border-color: var(--bad); }
+  .status.rendered { color: var(--accent); border-color: var(--accent); }
+  input, select, textarea { background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+                  padding: 8px 10px; border-radius: 6px; font: inherit; }
+  textarea { width: 100%; min-height: 80px; resize: vertical; font-family: inherit; }
+  .clip-title { font-weight: 600; font-size: 16px; margin: 0 0 4px 0; }
+  .clip-hook { font-style: italic; color: var(--muted); margin: 0 0 8px 0; }
+  .clip-rationale { color: var(--muted); font-size: 13px; margin: 6px 0; }
+  .timestamps { font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  video { width: 100%; max-width: 640px; border-radius: 8px; background: #000; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+  .excerpt { background: var(--panel-2); border-left: 3px solid var(--accent); padding: 10px 14px;
+             border-radius: 4px; font-size: 14px; margin: 10px 0; }
+  .badge { background: var(--panel-2); padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+  label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+
+  /* Metric tiles */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .metric { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .metric .num { font-size: 26px; font-weight: 700; color: var(--text); }
+  .metric .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-top: 4px; }
+
+  /* Jobs drawer */
+  .drawer { position: fixed; right: 0; top: 0; bottom: 0; width: 480px; background: var(--panel);
+            border-left: 1px solid var(--border); transform: translateX(100%); transition: transform .25s ease;
+            display: flex; flex-direction: column; z-index: 20; box-shadow: -12px 0 32px rgba(0,0,0,.35); }
+  .drawer.open { transform: translateX(0); }
+  .drawer header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; }
+  .drawer header h3 { margin: 0; font-size: 14px; }
+  .drawer .close { margin-left: auto; cursor: pointer; color: var(--muted); font-size: 18px; }
+  .drawer .body { overflow-y: auto; padding: 14px 18px; flex: 1; }
+  .job-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--panel-2); }
+  .job-card .title { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 6px; }
+  .progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin: 8px 0; }
+  .progress > div { height: 100%; background: var(--accent); transition: width .3s ease; }
+  .log { font-family: ui-monospace, SF Mono, Menlo, monospace; font-size: 11px; color: var(--muted); max-height: 160px;
+         overflow-y: auto; background: var(--bg); padding: 8px 10px; border-radius: 6px; white-space: pre-wrap;
+         border: 1px solid var(--border); }
+  .log .line.error { color: var(--bad); }
+  .log .line.warn { color: var(--warn); }
+
+  /* Modal */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center;
+              justify-content: center; z-index: 30; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px;
+           width: min(520px, 92vw); }
+  .modal h3 { margin: 0 0 12px 0; }
+
+  /* Tooltips / tips */
+  .tip { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  /* Toasts */
+  .toasts { position: fixed; bottom: 20px; right: 20px; z-index: 40; display: flex; flex-direction: column;
+            gap: 10px; max-width: 420px; }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+           padding: 12px 16px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
+           animation: toastSlide .25s ease; font-size: 14px; color: var(--text);
+           display: flex; align-items: flex-start; gap: 10px; }
+  .toast.success { border-left-color: var(--good); }
+  .toast.error { border-left-color: var(--bad); }
+  .toast.warn { border-left-color: var(--warn); }
+  .toast .x { margin-left: auto; color: var(--muted); cursor: pointer; background: none; border: 0; font-size: 18px; padding: 0 4px; }
+  .toast .title { font-weight: 600; margin-bottom: 2px; }
+  .toast .body { color: var(--muted); font-size: 13px; }
+  @keyframes toastSlide { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Podcast Clipper</h1>
+  <nav>
+    <a href="/" class="{% if active == 'library' %}active{% endif %}">Library</a>
+    <a href="/add" class="{% if active == 'add' %}active{% endif %}">Add source</a>
+    <a href="/search" class="{% if active == 'search' %}active{% endif %}">Search</a>
+    <a href="/brand" class="{% if active == 'brand' %}active{% endif %}">Brand kit</a>
+    <a href="/integrations" class="{% if active == 'integrations' %}active{% endif %}">Integrations</a>
+    <a href="/preferences" class="{% if active == 'prefs' %}active{% endif %}">Preferences</a>
+    <a href="/jobs" class="{% if active == 'jobs' %}active{% endif %}">Jobs</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="job-pill" onclick="JobDrawer.toggle()">
+    <span class="dot" id="pill-dot"></span>
+    <span id="pill-label">No active jobs</span>
+  </div>
+</header>
+<main>{% block body %}{% endblock %}</main>
+
+<div class="drawer" id="drawer">
+  <header><h3>Jobs</h3><span class="close" onclick="JobDrawer.toggle()">✕</span></header>
+  <div class="body" id="jobs-body"><p class="muted">Start an ingest or re-score to see live progress here.</p></div>
+</div>
+
+<div class="modal-bg" id="modal-bg" onclick="Modal.onBgClick(event)">
+  <div class="modal" id="modal"></div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+// ------- tiny utilities -------
+async function post(url, data) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(data || {})) form.append(k, v);
+  const r = await fetch(url, { method: "POST", body: form });
+  if (!r.ok) throw new Error(await r.text());
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("application/json") ? r.json() : r.text();
+}
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on") && typeof v === "function") n.addEventListener(k.slice(2), v);
+    else if (v != null) n.setAttribute(k, v);
+  }
+  for (const kid of kids) {
+    if (kid == null) continue;
+    n.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+  }
+  return n;
+}
+function fmtTs(sec) {
+  sec = Math.max(0, sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec - h*3600 - m*60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${s.toFixed(3).padStart(6,'0')}`;
+}
+
+// ------- toasts (replacing alert() everywhere) -------
+const Toast = {
+  show(msg, { title = "", kind = "info", duration = 4500 } = {}) {
+    const root = document.getElementById("toasts");
+    if (!root) return;
+    const t = document.createElement("div");
+    t.className = `toast ${kind}`;
+    const body = document.createElement("div");
+    body.style.flex = "1";
+    if (title) {
+      const h = document.createElement("div");
+      h.className = "title";
+      h.textContent = title;
+      body.appendChild(h);
+    }
+    const b = document.createElement("div");
+    b.className = "body";
+    b.textContent = msg;
+    body.appendChild(b);
+    t.appendChild(body);
+    const x = document.createElement("button");
+    x.className = "x";
+    x.textContent = "×";
+    x.onclick = () => t.remove();
+    t.appendChild(x);
+    root.appendChild(t);
+    if (duration) setTimeout(() => t.remove(), duration);
+    return t;
+  },
+  success(msg, title) { return this.show(msg, { title, kind: "success" }); },
+  error(msg, title)   { return this.show(msg, { title: title || "Error", kind: "error", duration: 7000 }); },
+  warn(msg, title)    { return this.show(msg, { title, kind: "warn" }); },
+  info(msg, title)    { return this.show(msg, { title, kind: "info" }); },
+};
+// Intercept alert() so any legacy call sites route through toasts.
+window.alert = (msg) => Toast.error(typeof msg === "string" ? msg : JSON.stringify(msg));
+
+// ------- modal -------
+const Modal = {
+  open(content) {
+    const m = document.getElementById("modal");
+    m.innerHTML = "";
+    m.appendChild(content);
+    document.getElementById("modal-bg").classList.add("open");
+  },
+  close() { document.getElementById("modal-bg").classList.remove("open"); },
+  onBgClick(e) { if (e.target.id === "modal-bg") Modal.close(); }
+};
+
+// ------- jobs drawer + SSE -------
+const JobDrawer = (() => {
+  const active = new Map(); // job_id -> { card, log, progBar, progText, source }
+  function upsertCard(job) {
+    const existing = active.get(job.id);
+    if (existing) return existing;
+    const body = document.getElementById("jobs-body");
+    if (body.firstChild && body.firstChild.classList && body.firstChild.classList.contains("muted")) body.innerHTML = "";
+    const dot = el("span", { class: `dot ${job.status || 'running'}`, id: `dot-${job.id}` });
+    const title = el("div", { class: "title" }, dot, job.label);
+    const progBar = el("div", { style: "width: 0%" });
+    const prog = el("div", { class: "progress" }, progBar);
+    const progText = el("div", { class: "muted", style: "font-size: 11px;" }, "Starting…");
+    const log = el("div", { class: "log" });
+    const card = el("div", { class: "job-card", id: `job-${job.id}` }, title, prog, progText, log);
+    body.prepend(card);
+    const h = { card, log, progBar, progText, dot, source: null };
+    active.set(job.id, h);
+    return h;
+  }
+  function watch(jobId, label) {
+    const h = upsertCard({ id: jobId, label, status: "running" });
+    const src = new EventSource(`/api/jobs/${jobId}/stream`);
+    h.source = src;
+    src.onmessage = (e) => {
+      const d = JSON.parse(e.data || "{}");
+      if (typeof d.progress === "number") {
+        h.progBar.style.width = `${Math.round(d.progress * 100)}%`;
+      }
+      if (d.message) {
+        const line = el("div", { class: `line ${d.level || 'info'}` }, d.message);
+        h.log.appendChild(line);
+        h.log.scrollTop = h.log.scrollHeight;
+        h.progText.textContent = d.message.length > 80 ? d.message.slice(0, 80) + "…" : d.message;
+      }
+      updatePill();
+    };
+    src.addEventListener("done", () => {
+      src.close();
+      h.source = null;
+      h.dot.className = "dot succeeded";
+      h.progBar.style.width = "100%";
+      h.progText.textContent = "Done.";
+      updatePill();
+    });
+    src.onerror = () => {
+      src.close();
+      h.source = null;
+      h.dot.className = "dot failed";
+      updatePill();
+    };
+    open();
+    updatePill();
+  }
+  function updatePill() {
+    const running = [...active.values()].filter(h => h.source != null).length;
+    const dot = document.getElementById("pill-dot");
+    const lbl = document.getElementById("pill-label");
+    if (running > 0) { dot.className = "dot running"; lbl.textContent = `${running} running`; }
+    else { dot.className = "dot"; lbl.textContent = "No active jobs"; }
+  }
+  function open() { document.getElementById("drawer").classList.add("open"); }
+  function close() { document.getElementById("drawer").classList.remove("open"); }
+  function toggle() { document.getElementById("drawer").classList.toggle("open"); }
+  return { watch, open, close, toggle, updatePill };
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
