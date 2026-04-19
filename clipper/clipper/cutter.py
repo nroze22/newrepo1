@@ -17,6 +17,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .audiogram import is_audio_only, render_audiogram
 from .captions import BrandKit, CaptionStyle, write_ass
 from .reframe import ReframePlan, build_reframe_filter_fragments
 from .transcript import Transcript
@@ -221,6 +222,18 @@ def render_clip(
     opts = opts or CutOptions()
     work_dir = Path(work_dir or Path(output).parent / ".work")
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Audio-only sources: render an audiogram instead of the normal clip cut.
+    if is_audio_only(Path(source)):
+        return render_audiogram(
+            Path(source), start, end, Path(output),
+            transcript=transcript,
+            title=(opts.caption_text or "").strip()[:80],
+            brand_kit=opts.brand_kit,
+            caption_style=(opts.caption_style or "tiktok_pop"),
+            target_w=opts.target_w, target_h=opts.target_h,
+            work_dir=work_dir,
+        )
 
     # 1) Build ASS captions if an animated style is requested.
     if opts.caption_style and transcript is not None:

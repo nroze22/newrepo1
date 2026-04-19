@@ -86,7 +86,8 @@ def distill_taste_profile(store: Store, *, model: str = DEFAULT_DISTILL_MODEL) -
             clip_lookup[cid] = clip
     body = render_examples(feedback, clip_lookup)
 
-    client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    from .clients import anthropic_client
+    client = anthropic_client()
     resp = client.messages.create(
         model=model,
         max_tokens=800,

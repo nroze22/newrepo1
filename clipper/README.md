@@ -83,10 +83,23 @@ cut the approved clips with `ffmpeg`.
 
 ```bash
 pip install -r requirements.txt
-# ffmpeg must be on PATH
+# ffmpeg + system libs for MediaPipe (Ubuntu/Debian):
+#   apt install ffmpeg libegl1 libgles2
 export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...        # only needed for Whisper fallback
+export OPENAI_API_KEY=sk-...           # optional — Whisper fallback + semantic search
+export CLIPPER_PASSWORD=something      # optional — enables the login gate
+export CLIPPER_MAX_CONCURRENT_JOBS=2   # optional — cap pipeline fan-out (default: 2)
 ```
+
+Verify everything is wired correctly:
+
+```bash
+python -m clipper.cli doctor
+```
+
+Runs the full media pipeline against a synthetic 30-second episode — face
+detection, smart reframe, ASS caption burning, thumbnail generation — plus
+dep + API-key checks. Takes ~25s.
 
 ## Two ways to drive it
 

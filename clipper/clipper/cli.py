@@ -160,6 +160,61 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Diagnose the environment: deps, API keys, and run the media-pipeline selftest."""
+    import json as _json, shutil as _shutil
+    from . import selftest
+
+    print("Clipper doctor\n" + "=" * 60)
+
+    checks: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, note: str = ""):
+        status = "✓" if ok else "✗"
+        print(f"  {status}  {name}{'  — ' + note if note else ''}")
+        checks.append((name, ok, note))
+
+    # Binaries
+    ffmpeg = _shutil.which("ffmpeg")
+    check("ffmpeg on PATH", bool(ffmpeg), ffmpeg or "install via: apt install ffmpeg / brew install ffmpeg")
+    ytdlp = _shutil.which("yt-dlp") or True  # yt-dlp is a pip package too
+    check("yt-dlp importable", _can_import("yt_dlp"))
+
+    # Python libs
+    for lib in ["anthropic", "openai", "fastapi", "uvicorn", "jinja2",
+                "mediapipe", "cv2", "PIL", "numpy", "tiktoken"]:
+        check(f"python lib: {lib}", _can_import(lib))
+
+    # API keys
+    import os as _os
+    check("ANTHROPIC_API_KEY set", bool(_os.environ.get("ANTHROPIC_API_KEY")),
+          "required for agent pipeline")
+    check("OPENAI_API_KEY set", bool(_os.environ.get("OPENAI_API_KEY")),
+          "optional — needed for Whisper fallback + semantic search")
+
+    # Quick pytest-style media selftest
+    print("\nMedia pipeline selftest (synthetic 30s episode)…")
+    report = selftest.run_all(verbose=True)
+    check("End-to-end media pipeline", bool(report.get("passed")), f"work_dir={report.get('work_dir')}")
+
+    print("\nSummary:")
+    failed = [n for n, ok, _ in checks if not ok]
+    if failed:
+        print(f"  FAILED: {len(failed)} check(s) — " + ", ".join(failed))
+        return 1
+    print(f"  All {len(checks)} checks passed.")
+    return 0
+
+
+def _can_import(mod: str) -> bool:
+    import importlib
+    try:
+        importlib.import_module(mod)
+        return True
+    except Exception:
+        return False
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     db_path, _, _ = _paths(Path(args.workdir))
     store = Store(db_path)
@@ -215,6 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser("list", help="Print a summary of scored videos")
     pl.set_defaults(func=cmd_list)
+
+    pd = sub.add_parser("doctor", help="Check deps, API keys, and run the end-to-end media selftest")
+    pd.set_defaults(func=cmd_doctor)
 
     return p
 

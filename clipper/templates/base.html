@@ -114,6 +114,21 @@
 
   /* Tooltips / tips */
   .tip { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  /* Toasts */
+  .toasts { position: fixed; bottom: 20px; right: 20px; z-index: 40; display: flex; flex-direction: column;
+            gap: 10px; max-width: 420px; }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+           padding: 12px 16px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
+           animation: toastSlide .25s ease; font-size: 14px; color: var(--text);
+           display: flex; align-items: flex-start; gap: 10px; }
+  .toast.success { border-left-color: var(--good); }
+  .toast.error { border-left-color: var(--bad); }
+  .toast.warn { border-left-color: var(--warn); }
+  .toast .x { margin-left: auto; color: var(--muted); cursor: pointer; background: none; border: 0; font-size: 18px; padding: 0 4px; }
+  .toast .title { font-weight: 600; margin-bottom: 2px; }
+  .toast .body { color: var(--muted); font-size: 13px; }
+  @keyframes toastSlide { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
 </style>
 </head>
 <body>
@@ -145,6 +160,8 @@
   <div class="modal" id="modal"></div>
 </div>
 
+<div class="toasts" id="toasts"></div>
+
 <script>
 // ------- tiny utilities -------
 async function post(url, data) {
@@ -173,6 +190,43 @@ function fmtTs(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec - h*3600 - m*60;
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${s.toFixed(3).padStart(6,'0')}`;
 }
+
+// ------- toasts (replacing alert() everywhere) -------
+const Toast = {
+  show(msg, { title = "", kind = "info", duration = 4500 } = {}) {
+    const root = document.getElementById("toasts");
+    if (!root) return;
+    const t = document.createElement("div");
+    t.className = `toast ${kind}`;
+    const body = document.createElement("div");
+    body.style.flex = "1";
+    if (title) {
+      const h = document.createElement("div");
+      h.className = "title";
+      h.textContent = title;
+      body.appendChild(h);
+    }
+    const b = document.createElement("div");
+    b.className = "body";
+    b.textContent = msg;
+    body.appendChild(b);
+    t.appendChild(body);
+    const x = document.createElement("button");
+    x.className = "x";
+    x.textContent = "×";
+    x.onclick = () => t.remove();
+    t.appendChild(x);
+    root.appendChild(t);
+    if (duration) setTimeout(() => t.remove(), duration);
+    return t;
+  },
+  success(msg, title) { return this.show(msg, { title, kind: "success" }); },
+  error(msg, title)   { return this.show(msg, { title: title || "Error", kind: "error", duration: 7000 }); },
+  warn(msg, title)    { return this.show(msg, { title, kind: "warn" }); },
+  info(msg, title)    { return this.show(msg, { title, kind: "info" }); },
+};
+// Intercept alert() so any legacy call sites route through toasts.
+window.alert = (msg) => Toast.error(typeof msg === "string" ? msg : JSON.stringify(msg));
 
 // ------- modal -------
 const Modal = {

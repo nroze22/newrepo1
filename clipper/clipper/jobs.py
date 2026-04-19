@@ -66,11 +66,17 @@ class JobContext:
 
 
 class JobManager:
-    def __init__(self) -> None:
+    def __init__(self, *, max_concurrent: int | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._subscribers: dict[str, list[asyncio.Queue[LogLine | None]]] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        import os as _os
+        cc = max_concurrent if max_concurrent is not None else int(
+            _os.environ.get("CLIPPER_MAX_CONCURRENT_JOBS", "2")
+        )
+        self._semaphore = threading.Semaphore(max(1, cc))
+        self.max_concurrent = max(1, cc)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -111,22 +117,31 @@ class JobManager:
                 subs.remove(queue)
 
     def _run(self, job: Job, target: Callable[[JobContext], Any]) -> None:
-        job.status = JobStatus.RUNNING
-        job.started_at = time.time()
         ctx = JobContext(self, job)
+        # Throttle concurrent runs — prevents multiple full pipelines from
+        # blowing the Anthropic token budget or pummeling the GPU.
+        acquired = self._semaphore.acquire(blocking=False)
+        if not acquired:
+            ctx.info(f"Waiting (≤{self.max_concurrent} concurrent jobs)…", progress=0.0)
+            self._semaphore.acquire()
         try:
-            ctx.info(f"{job.label} started", progress=0.0)
-            job.result = target(ctx)
-            job.status = JobStatus.SUCCEEDED
-            self._emit(job, LogLine(time.time(), "done", "Completed", 1.0))
-        except Exception as e:
-            job.status = JobStatus.FAILED
-            job.error = f"{type(e).__name__}: {e}"
-            tb = traceback.format_exc(limit=4)
-            self._emit(job, LogLine(time.time(), "error", job.error + "\n" + tb, None))
+            job.status = JobStatus.RUNNING
+            job.started_at = time.time()
+            try:
+                ctx.info(f"{job.label} started", progress=0.0)
+                job.result = target(ctx)
+                job.status = JobStatus.SUCCEEDED
+                self._emit(job, LogLine(time.time(), "done", "Completed", 1.0))
+            except Exception as e:
+                job.status = JobStatus.FAILED
+                job.error = f"{type(e).__name__}: {e}"
+                tb = traceback.format_exc(limit=4)
+                self._emit(job, LogLine(time.time(), "error", job.error + "\n" + tb, None))
+            finally:
+                job.finished_at = time.time()
+                self._broadcast(job, None)
         finally:
-            job.finished_at = time.time()
-            self._broadcast(job, None)  # sentinel to close SSE streams
+            self._semaphore.release()
 
     def _emit(self, job: Job, line: LogLine) -> None:
         if line.progress is not None:

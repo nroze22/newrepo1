@@ -133,7 +133,7 @@ class TranscribeOptions:
 def transcribe_video(video: Path, out_dir: Path, opts: TranscribeOptions | None = None) -> Path:
     """Transcribe a video file. Returns the path to a Whisper JSON transcript."""
     try:
-        from openai import OpenAI
+        import openai  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "openai is required for auto-transcription. Install with: pip install openai"
@@ -151,7 +151,8 @@ def transcribe_video(video: Path, out_dir: Path, opts: TranscribeOptions | None 
 
     audio = _extract_audio(video, out_dir / ".audio")
     chunks = _split_audio(audio, out_dir / ".audio" / "chunks")
-    client = OpenAI()
+    from .clients import openai_client
+    client = openai_client()
     parts: list[tuple[dict, float]] = []
     for chunk, offset in chunks:
         data = _transcribe_chunk(client, chunk)

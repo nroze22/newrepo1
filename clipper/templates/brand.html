@@ -57,6 +57,41 @@
     </form>
   </div>
 
+  <h2 style="margin-top: 24px;">Per-show kits <span class="muted" style="font-weight: normal; font-size: 12px; text-transform: none; letter-spacing: 0;">({{ show_kits|length }})</span></h2>
+  <div class="card">
+    <p class="muted">Override the global defaults for a specific show. Match by
+      <code>channel:&lt;YouTube channel name&gt;</code> or <code>slug:&lt;filename prefix&gt;</code>.
+      The renderer picks the best match for each video; everything else uses the global kit above.</p>
+    {% if show_kits %}
+      <div style="margin-bottom: 14px;">
+        {% for k in show_kits %}
+          <div style="padding: 8px 0; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center;">
+            <strong>{{ k.name }}</strong>
+            <span class="muted" style="font-size: 12px;">{{ k.show_key }}</span>
+            <span class="tag" style="background: {{ k.kit.get('primary_color') or '#fff' }}; color: #111; border: 0;">primary</span>
+            <span class="tag" style="background: {{ k.kit.get('accent_color') or '#FF5B7A' }}; color: #111; border: 0;">accent</span>
+            <span class="muted" style="font-size: 12px; margin-left: auto;">{{ k.updated_at }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <form onsubmit="return saveShowKit(event)">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <label>Match key
+          <input type="text" name="show_key" placeholder="channel:Lex Fridman Podcast" required>
+          <div class="tip">Use <code>channel:NAME</code> or <code>slug:PREFIX</code>.</div>
+        </label>
+        <label>Display name
+          <input type="text" name="name" placeholder="Lex Fridman">
+        </label>
+      </div>
+      <textarea name="kit_json" rows="6" placeholder='{"primary_color":"#FFFFFF","accent_color":"#FFD84D","font":"Inter"}' style="margin-top: 10px; font-family: ui-monospace, monospace; font-size: 12px;">{"primary_color":"#FFFFFF","accent_color":"#FFD84D","font":"Inter"}</textarea>
+      <div class="toolbar" style="margin-top: 10px;">
+        <button class="btn primary" type="submit">Save show kit</button>
+      </div>
+    </form>
+  </div>
+
   <h2 style="margin-top: 24px;">Preview</h2>
   <div class="card" id="preview-card">
     <div class="muted">How your active-word caption will look:</div>
@@ -91,6 +126,16 @@ async function saveKit(e) {
   const r = await fetch("/api/brand-kit", { method: "POST", body: fd });
   if (!r.ok) { alert(await r.text()); return false; }
   location.reload();
+  return false;
+}
+async function saveShowKit(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  try { JSON.parse(fd.get("kit_json")); } catch (err) { Toast.error("Invalid JSON: " + err.message); return false; }
+  const r = await fetch("/api/show-kits", { method: "POST", body: fd });
+  if (!r.ok) { Toast.error(await r.text(), "Save failed"); return false; }
+  Toast.success("Show kit saved.");
+  setTimeout(() => location.reload(), 500);
   return false;
 }
 function refreshPreview() {

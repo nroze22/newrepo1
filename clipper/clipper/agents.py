@@ -133,7 +133,10 @@ class ClipPackage:
 
 
 def _anthropic(client: Anthropic | None = None) -> Anthropic:
-    return client or Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    if client is not None:
+        return client
+    from .clients import anthropic_client
+    return anthropic_client()  # type: ignore[return-value]
 
 
 def _coalesce_text(resp) -> str:

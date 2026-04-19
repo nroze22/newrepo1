@@ -70,16 +70,16 @@ async function savePostiz(e) {
   const fd = new FormData(form);
   if (!fd.get("api_key")) fd.delete("api_key");  // keep stored key when blank
   const r = await fetch("/api/postiz/config", { method: "POST", body: fd });
-  if (!r.ok) { alert(await r.text()); return false; }
-  alert("Saved.");
+  if (!r.ok) { Toast.error(await r.text(), "Save failed"); return false; }
+  Toast.success("Postiz credentials saved.");
   return false;
 }
 async function testConnection() {
   const r = await fetch("/api/postiz/test", { method: "POST" });
-  if (!r.ok) { alert("Failed: " + await r.text()); return; }
+  if (!r.ok) { Toast.error(await r.text(), "Test failed"); return; }
   const data = await r.json();
-  alert(`Connected · ${data.count} channel(s) found.`);
-  location.reload();
+  Toast.success(`${data.count} channel(s) found.`, "Connected");
+  setTimeout(() => location.reload(), 800);
 }
 </script>
 {% endblock %}

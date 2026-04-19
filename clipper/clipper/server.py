@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.templating import Jinja2Templates
 
 from .agents import EpisodeBrief
+from .auth import install_auth
 from .captions import BrandKit, CaptionStyle
 from .cost import estimate as estimate_cost
 from .cutter import CutOptions, cut_clip, render_clip
@@ -34,6 +35,7 @@ from . import search as search_mod
 from .store import ClipRow, Store
 from .thumbnails import generate_thumbnails
 from .transcript import format_timestamp, parse_transcript
+from .waveform import compute_waveform
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -140,6 +142,7 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
     workdir = Path(workdir) if workdir else Path(db_path).parent
 
     app = FastAPI(title="Podcast Clipper")
+    install_auth(app)
 
     @app.on_event("startup")
     async def _bind() -> None:
@@ -190,6 +193,44 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         thumbnails = {c.id: store.get_thumbnails(c.id) for c in clips}
         schedules = {c.id: store.list_scheduled_posts(clip_id=c.id) for c in clips}
         packages_by_id = {str(c.id): (packages.get(c.id) or {}) for c in clips}
+
+        # Word-level timings for the caption-preview + scrubber. Parse the
+        # transcript once, then extract the words that fall inside each clip
+        # window. Kept small by capping to the top 40 words per clip.
+        words_by_clip: dict[str, list[dict]] = {}
+        try:
+            transcript = parse_transcript(Path(videos[video_id].transcript_path))
+            for c in clips:
+                entries: list[dict] = []
+                for seg in transcript.segments:
+                    if seg.end < c.start_sec or seg.start > c.end_sec:
+                        continue
+                    for w in (seg.words or []):
+                        if w.end > c.start_sec and w.start < c.end_sec:
+                            entries.append({
+                                "start": max(w.start, c.start_sec),
+                                "end": min(w.end, c.end_sec),
+                                "text": w.text.strip(),
+                            })
+                    if not seg.words:
+                        # Even distribution fallback when words are missing.
+                        tokens = [t for t in seg.text.split() if t]
+                        if tokens:
+                            step = max(0.05, (seg.end - seg.start) / len(tokens))
+                            for i, tok in enumerate(tokens):
+                                ts = seg.start + i * step
+                                te = min(seg.end, ts + step)
+                                if te > c.start_sec and ts < c.end_sec:
+                                    entries.append({
+                                        "start": max(ts, c.start_sec),
+                                        "end": min(te, c.end_sec),
+                                        "text": tok,
+                                    })
+                entries.sort(key=lambda e: e["start"])
+                words_by_clip[str(c.id)] = entries[:60]
+        except Exception:
+            words_by_clip = {}
+
         postiz_cfg = store.get_postiz_config()
         return TEMPLATES.TemplateResponse(
             request,
@@ -206,6 +247,8 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
                 "postiz_integrations": postiz_cfg.get("integrations") or [],
                 "postiz_configured": bool(postiz_cfg.get("base_url") and postiz_cfg.get("api_key")),
                 "packages_by_id": packages_by_id,
+                "words_by_clip": words_by_clip,
+                "snapshots": store.list_snapshots(video_id),
                 "caption_styles": [
                     {"key": "tiktok_pop", "name": "TikTok Pop"},
                     {"key": "clean_minimal", "name": "Clean Minimal"},
@@ -310,6 +353,10 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         item = LibraryItem(video_path=Path(v.video_path), transcript_path=Path(v.transcript_path))
 
         def task(ctx: JobContext) -> dict:
+            # Snapshot the current clip set so the user can undo if they don't
+            # like the new output.
+            snap_id = store.snapshot_clips(video_id, label="pre-rescore")
+            ctx.info(f"Snapshot saved (id={snap_id}) — undo available in the UI.")
             taste = store.get_taste_profile() if use_taste else ""
             meta = SourceMeta(
                 source_url=v.source_url or "",
@@ -322,10 +369,22 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
                 model=model, max_clips=max_clips, min_score=min_score,
                 taste=taste, ctx=ctx, base=0.0, span=1.0,
             )
-            return {"video": v.slug}
+            return {"video": v.slug, "snapshot_id": snap_id}
 
         job = job_manager.submit("rescore", f"Re-score: {v.slug}", task)
         return {"job_id": job.id}
+
+    @app.get("/api/videos/{video_id}/snapshots")
+    def list_video_snapshots(video_id: int):
+        return {"snapshots": store.list_snapshots(video_id)}
+
+    @app.post("/api/snapshots/{snapshot_id}/restore")
+    def restore_snapshot(snapshot_id: int):
+        try:
+            video_id = store.restore_snapshot(snapshot_id)
+        except KeyError:
+            raise HTTPException(404, "Snapshot not found")
+        return {"ok": True, "video_id": video_id}
 
     @app.post("/api/distill-taste")
     async def distill_api():
@@ -428,7 +487,9 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
 
     def _opts_for(clip: ClipRow, *, vertical: bool, caption_style: str | None,
                   burn_captions: bool, smart_reframe: bool = True) -> CutOptions:
-        kit_dict = store.get_brand_kit()
+        # Prefer a per-show kit matched by channel or slug prefix; fall back
+        # to the global default.
+        kit_dict = store.get_show_kit_for_video(clip.video_id) or store.get_brand_kit()
         brand_kit = BrandKit(**{k: v for k, v in kit_dict.items() if k in BrandKit.__dataclass_fields__}) if kit_dict else BrandKit()
         return CutOptions(
             vertical=vertical,
@@ -505,7 +566,23 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
     @app.get("/brand", response_class=HTMLResponse)
     def brand_page(request: Request):
         kit = store.get_brand_kit() or {}
-        return TEMPLATES.TemplateResponse(request, "brand.html", {"kit": kit})
+        show_kits = store.list_show_kits()
+        return TEMPLATES.TemplateResponse(
+            request, "brand.html", {"kit": kit, "show_kits": show_kits},
+        )
+
+    @app.post("/api/show-kits")
+    def save_show_kit(
+        show_key: str = Form(...),
+        name: str = Form(""),
+        kit_json: str = Form("{}"),
+    ):
+        try:
+            kit = json.loads(kit_json)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, f"Invalid JSON: {e}")
+        sid = store.upsert_show_kit(show_key=show_key.strip(), name=name.strip() or show_key, kit=kit)
+        return {"ok": True, "id": sid}
 
     @app.post("/api/brand-kit")
     def save_brand_kit_api(
@@ -815,6 +892,36 @@ def create_app(db_path: Path, output_dir: Path, workdir: Path | None = None) -> 
         if not clip or not clip.output_path:
             raise HTTPException(404, "Not rendered yet")
         return FileResponse(clip.output_path, media_type="video/mp4")
+
+    @app.get("/api/clips/{clip_id}/waveform")
+    def clip_waveform(clip_id: int, pad: float = 3.0):
+        """Return a waveform peaks array for the clip range (with a small pad).
+
+        The pad lets the scrubber show a little context on either side so the
+        user can nudge boundaries outward if needed.
+        """
+        clip = store.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        videos = {v.id: v for v in store.list_videos()}
+        video = videos.get(clip.video_id)
+        if not video:
+            raise HTTPException(404, "Video not found")
+        start = max(0.0, clip.start_sec - pad)
+        end = clip.end_sec + pad
+        if video.duration:
+            end = min(end, video.duration)
+        try:
+            wf = compute_waveform(Path(video.video_path), start, end)
+        except Exception as e:
+            raise HTTPException(500, f"Waveform failed: {e}") from e
+        return {
+            "waveform": wf.to_dict(),
+            "clip_start": clip.start_sec,
+            "clip_end": clip.end_sec,
+            "view_start": start,
+            "view_end": end,
+        }
 
     return app
 

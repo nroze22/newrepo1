@@ -35,19 +35,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-_MP_FACE = None
-
-
-def _face_detector():
-    """Lazy-load MediaPipe's short-range face detector (CPU real-time)."""
-    global _MP_FACE
-    if _MP_FACE is None:
-        import mediapipe as mp
-        _MP_FACE = mp.solutions.face_detection.FaceDetection(
-            model_selection=1,           # 0: close-up, 1: up to ~5m
-            min_detection_confidence=0.5,
-        )
-    return _MP_FACE
+from .vision import detect_best_face
 
 
 @dataclass
@@ -107,26 +95,11 @@ def _sample_frames(
 
 def _detect_center(frame: np.ndarray) -> tuple[float | None, float]:
     """Return (x_center_px, confidence) for the most confident face in the frame, or (None, 0)."""
-    detector = _face_detector()
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = detector.process(rgb)
-    if not result.detections:
+    hit = detect_best_face(rgb)
+    if hit is None:
         return None, 0.0
-    h, w = frame.shape[:2]
-    best = None
-    best_conf = -1.0
-    for det in result.detections:
-        # Confidence
-        conf = 0.0
-        if det.score:
-            conf = float(det.score[0])
-        # Bounding box in relative coords
-        bbox = det.location_data.relative_bounding_box
-        cx = (bbox.xmin + bbox.width / 2.0) * w
-        if conf > best_conf:
-            best_conf = conf
-            best = cx
-    return best, best_conf
+    return hit.cx, hit.confidence
 
 
 def _smooth(timeline: list[tuple[float, float]], window_sec: float = 1.5) -> list[tuple[float, float]]:

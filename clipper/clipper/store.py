@@ -142,6 +142,26 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sched_clip ON scheduled_posts(clip_id);
+
+CREATE TABLE IF NOT EXISTS clip_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+    label TEXT,
+    clips_json TEXT NOT NULL,        -- full clip set at the moment of snapshot
+    packages_json TEXT,              -- packages for those clips
+    brief_json TEXT,                 -- episode brief (may be null)
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_video ON clip_snapshots(video_id);
+
+CREATE TABLE IF NOT EXISTS show_brand_kits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_key TEXT UNIQUE NOT NULL,   -- e.g. "channel:Test Channel" or "slug:prefix-ep"
+    name TEXT,
+    kit_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -494,6 +514,135 @@ class Store:
     def delete_scheduled_post(self, id: int) -> None:
         with self._conn() as conn:
             conn.execute("DELETE FROM scheduled_posts WHERE id = ?", (id,))
+
+    # ---- Snapshots / undo --------------------------------------------------
+
+    def snapshot_clips(self, video_id: int, *, label: str = "pre-rescore") -> int:
+        clips = self.list_clips(video_id=video_id)
+        clips_payload = [
+            {
+                "id": c.id, "start_sec": c.start_sec, "end_sec": c.end_sec,
+                "title": c.title, "hook": c.hook, "rationale": c.rationale,
+                "score": c.score, "tags": c.tags, "transcript_excerpt": c.transcript_excerpt,
+                "status": c.status, "output_path": c.output_path,
+            } for c in clips
+        ]
+        packages = {c.id: self.get_clip_package(c.id) for c in clips}
+        brief, _ = self.get_brief(video_id)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO clip_snapshots (video_id, label, clips_json, packages_json, brief_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (video_id, label,
+                 json.dumps(clips_payload),
+                 json.dumps({str(k): v for k, v in packages.items()}),
+                 json.dumps(brief) if brief else None),
+            )
+            return int(cur.lastrowid)
+
+    def list_snapshots(self, video_id: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, label, created_at FROM clip_snapshots "
+                "WHERE video_id = ? ORDER BY id DESC LIMIT 20",
+                (video_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def restore_snapshot(self, snapshot_id: int) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT video_id, clips_json, packages_json, brief_json FROM clip_snapshots WHERE id = ?",
+                (snapshot_id,),
+            ).fetchone()
+        if not row:
+            raise KeyError(snapshot_id)
+        video_id = int(row["video_id"])
+        clips = json.loads(row["clips_json"]) or []
+        packages = json.loads(row["packages_json"] or "{}")
+        brief = json.loads(row["brief_json"]) if row["brief_json"] else None
+
+        with self._conn() as conn:
+            conn.execute("DELETE FROM clips WHERE video_id = ?", (video_id,))
+            for c in clips:
+                conn.execute(
+                    "INSERT INTO clips (video_id, start_sec, end_sec, title, hook, rationale, "
+                    "score, tags, transcript_excerpt, status, output_path) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (video_id, c["start_sec"], c["end_sec"], c["title"], c["hook"],
+                     c["rationale"], c["score"], json.dumps(c["tags"]),
+                     c["transcript_excerpt"], c["status"], c.get("output_path")),
+                )
+        # Repopulate packages (best effort — mapped by new clip ids in insertion order).
+        new_clips = self.list_clips(video_id=video_id)
+        for i, new_clip in enumerate(new_clips):
+            old_id = str(clips[i]["id"]) if i < len(clips) else None
+            pkg = (packages.get(old_id) if old_id else None) or {}
+            if pkg:
+                self.save_clip_package(new_clip.id, pkg)
+        if brief:
+            self.save_brief(video_id, brief)
+        return video_id
+
+    # ---- Per-show brand kits ----------------------------------------------
+
+    def list_show_kits(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, show_key, name, kit_json, updated_at FROM show_brand_kits "
+                "ORDER BY name"
+            ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                kit = json.loads(r["kit_json"] or "{}")
+            except json.JSONDecodeError:
+                kit = {}
+            out.append({"id": int(r["id"]), "show_key": r["show_key"],
+                        "name": r["name"] or r["show_key"], "kit": kit,
+                        "updated_at": r["updated_at"]})
+        return out
+
+    def upsert_show_kit(self, *, show_key: str, name: str, kit: dict) -> int:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO show_brand_kits (show_key, name, kit_json, updated_at) "
+                "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(show_key) DO UPDATE SET name=excluded.name, "
+                "kit_json=excluded.kit_json, updated_at=CURRENT_TIMESTAMP",
+                (show_key, name or show_key, json.dumps(kit or {})),
+            )
+            row = conn.execute("SELECT id FROM show_brand_kits WHERE show_key = ?", (show_key,)).fetchone()
+            return int(row["id"])
+
+    def get_show_kit_for_video(self, video_id: int) -> dict:
+        """Pick the best matching show brand kit for a video, or the global default."""
+        with self._conn() as conn:
+            v = conn.execute("SELECT slug, channel FROM videos WHERE id = ?", (video_id,)).fetchone()
+        if not v:
+            return self.get_brand_kit()
+        keys = []
+        if v["channel"]:
+            keys.append(f"channel:{v['channel']}")
+        if v["slug"]:
+            # Match by slug prefix (everything before first '__' or ' ').
+            slug = v["slug"]
+            for sep in ("__", " ", "-"):
+                if sep in slug:
+                    slug = slug.split(sep, 1)[0]
+                    break
+            keys.append(f"slug:{slug}")
+        with self._conn() as conn:
+            for k in keys:
+                row = conn.execute(
+                    "SELECT kit_json FROM show_brand_kits WHERE show_key = ?", (k,)
+                ).fetchone()
+                if row:
+                    try:
+                        return json.loads(row["kit_json"] or "{}")
+                    except json.JSONDecodeError:
+                        pass
+        return self.get_brand_kit()
 
     def save_brand_kit(self, kit: dict) -> None:
         with self._conn() as conn:

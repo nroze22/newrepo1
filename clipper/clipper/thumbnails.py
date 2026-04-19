@@ -29,32 +29,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .captions import BrandKit
-
-_FACE_DET = None
-_FACE_MESH = None
-
-
-def _face_detector():
-    global _FACE_DET
-    if _FACE_DET is None:
-        import mediapipe as mp
-        _FACE_DET = mp.solutions.face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=0.5,
-        )
-    return _FACE_DET
-
-
-def _face_mesh():
-    global _FACE_MESH
-    if _FACE_MESH is None:
-        import mediapipe as mp
-        _FACE_MESH = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-        )
-    return _FACE_MESH
+from .vision import detect_best_face, expression_score
 
 
 # ---------------------------------------------------------------------------
@@ -87,42 +62,6 @@ def _exposure(gray: np.ndarray) -> float:
     return max(0.0, 1.0 - dev) * (1.0 - min(clipped * 5.0, 1.0))
 
 
-def _expression(rgb: np.ndarray) -> float:
-    """Rough smile/eye-openness proxy from Face Mesh landmarks.
-
-    Returns 0..1. 0.5 is neutral; >0.7 suggests open expression (good thumbnail).
-    """
-    try:
-        res = _face_mesh().process(rgb)
-    except Exception:
-        return 0.5
-    if not res.multi_face_landmarks:
-        return 0.0
-    lm = res.multi_face_landmarks[0].landmark
-
-    def dist(a, b):
-        return math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y)
-
-    # Mouth openness: upper lip 13 to lower lip 14, normalized by face height.
-    mouth_h = dist(13, 14)
-    # Smile width: left corner 61, right corner 291.
-    mouth_w = dist(61, 291)
-    # Face height proxy: 10 (forehead) to 152 (chin).
-    face_h = max(dist(10, 152), 1e-6)
-    # Eyes openness — left eye upper 159 / lower 145, right 386/374.
-    left_eye = dist(159, 145) / face_h
-    right_eye = dist(386, 374) / face_h
-    eye_open = (left_eye + right_eye) / 2.0
-
-    smile = mouth_w / face_h
-    openness = mouth_h / face_h
-    # Heuristic: strong smile ~0.55, wide open mouth ~0.05+.
-    smile_score = min(1.0, max(0.0, (smile - 0.35) / 0.3))
-    openness_score = min(1.0, max(0.0, openness / 0.08))
-    eye_score = min(1.0, max(0.0, (eye_open - 0.015) / 0.025))
-    return 0.5 * smile_score + 0.3 * openness_score + 0.2 * eye_score
-
-
 def score_frame(frame: np.ndarray, t: float) -> FrameScore:
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -130,17 +69,16 @@ def score_frame(frame: np.ndarray, t: float) -> FrameScore:
     expo = _exposure(gray)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    det = _face_detector().process(rgb)
+    hit = detect_best_face(rgb)
     face_bbox: tuple[int, int, int, int] | None = None
     face_area = 0.0
-    if det.detections:
-        d = max(det.detections, key=lambda x: (x.score[0] if x.score else 0))
-        bb = d.location_data.relative_bounding_box
-        fx, fy = max(0, int(bb.xmin * w)), max(0, int(bb.ymin * h))
-        fw, fh = max(1, int(bb.width * w)), max(1, int(bb.height * h))
-        face_bbox = (fx, fy, fw, fh)
-        face_area = min(1.0, (fw * fh) / (w * h) * 4.0)  # scaled: 25% is a great fill
-    expr = _expression(rgb) if face_bbox else 0.0
+    if hit is not None:
+        face_bbox = (hit.x, hit.y, hit.w, hit.h)
+        face_area = min(1.0, (hit.w * hit.h) / (w * h) * 4.0)
+    try:
+        expr = expression_score(rgb) if face_bbox else 0.0
+    except Exception:
+        expr = 0.0
 
     # Combined score — tuned defaults.
     sharp_norm = min(1.0, sharp / 400.0)

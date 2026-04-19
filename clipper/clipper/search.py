@@ -24,8 +24,8 @@ BATCH_SIZE = 64
 
 
 def _client():
-    from openai import OpenAI
-    return OpenAI()
+    from .clients import openai_client
+    return openai_client()
 
 
 def _pack(vec: np.ndarray) -> bytes:

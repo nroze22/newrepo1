@@ -73,6 +73,9 @@
     <div class="row" style="flex-wrap: wrap; gap: 16px;">
       <div class="grow muted" style="font-size: 13px;">Render options apply to every clip you render below.</div>
       <button class="btn" onclick="rescore({{ video.id }}, '{{ (video.title or video.slug)|replace("'", "\\'") }}')">Re-run agents</button>
+      {% if snapshots %}
+        <button class="btn" onclick="undoModal({{ video.id }})">Undo ↩</button>
+      {% endif %}
       <form id="render-config" method="post" action="/videos/{{ video.id }}/render-approved" onsubmit="return batchRender(event, {{ video.id }});">
         <label class="inline"><input type="checkbox" name="vertical" id="render-vertical" checked> 9:16 vertical</label>
         <label class="inline"><input type="checkbox" name="smart_reframe" id="render-smart" checked> smart reframe</label>
@@ -126,8 +129,28 @@
       {% if c.transcript_excerpt %}<div class="excerpt">{{ c.transcript_excerpt }}</div>{% endif %}
 
       <video controls preload="metadata"
+             id="video-{{ c.id }}"
              data-video-id="{{ video.id }}"
              src="/media/video/{{ video.id }}#t={{ c.start_sec }},{{ c.end_sec }}"></video>
+
+      <div class="scrubber" id="scrubber-{{ c.id }}"
+           data-clip-id="{{ c.id }}"
+           data-start="{{ c.start_sec }}"
+           data-end="{{ c.end_sec }}">
+        <canvas class="wave" width="800" height="72"></canvas>
+        <div class="handle start" title="Drag to adjust start">⟨</div>
+        <div class="handle end" title="Drag to adjust end">⟩</div>
+        <div class="playhead"></div>
+        <div class="range"></div>
+        <div class="scrub-hint muted">J/K/L to play · ←/→ nudge handle · Shift+←/→ = 1s</div>
+      </div>
+
+      <div class="caption-preview-box" id="cappreview-{{ c.id }}">
+        <div class="cp-label">Caption preview</div>
+        <div class="cp-stage">
+          <span class="cp-line" id="cpline-{{ c.id }}"></span>
+        </div>
+      </div>
 
       {# ------------- SOCIAL PACKAGE ------------- #}
       {% if pkg %}
@@ -268,6 +291,34 @@
   .sched-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
   .sched-card.sel { border-color: var(--accent); }
   .sched-card textarea { width: 100%; min-height: 72px; margin-top: 6px; font-family: inherit; font-size: 13px; }
+
+  /* Scrubber */
+  .scrubber { position: relative; height: 96px; margin: 10px 0 4px 0; user-select: none;
+              background: var(--panel-2); border-radius: 8px; border: 1px solid var(--border); overflow: hidden; }
+  .scrubber canvas.wave { display: block; width: 100%; height: 72px; }
+  .scrubber .handle { position: absolute; top: 0; bottom: 24px; width: 14px; cursor: ew-resize;
+                      background: var(--accent); display: flex; align-items: center; justify-content: center;
+                      color: #1a0008; font-weight: 700; font-size: 13px; z-index: 3;
+                      box-shadow: 0 0 0 2px rgba(255,91,122,.3); border-radius: 3px; }
+  .scrubber .handle.start { transform: translateX(-7px); }
+  .scrubber .handle.end   { transform: translateX(-7px); }
+  .scrubber .range { position: absolute; top: 0; bottom: 24px; background: rgba(255,91,122,.18);
+                     border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); z-index: 1; }
+  .scrubber .playhead { position: absolute; top: 0; bottom: 24px; width: 2px; background: var(--good);
+                        z-index: 2; pointer-events: none; transition: left 0.1s linear; }
+  .scrubber .scrub-hint { position: absolute; bottom: 4px; left: 10px; right: 10px; font-size: 11px; }
+
+  /* Caption preview */
+  .caption-preview-box { margin: 8px 0 12px; }
+  .cp-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+              font-weight: 600; margin-bottom: 4px; }
+  .cp-stage { height: 90px; border-radius: 8px; border: 1px solid var(--border);
+              background: radial-gradient(circle at 50% 30%, #1a1f2e 0%, #0b0d12 100%);
+              display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+  .cp-line { font-weight: 800; font-size: 28px; letter-spacing: 0.01em; text-align: center;
+             padding: 0 18px; line-height: 1.2; transition: transform .12s ease, opacity .12s ease; }
+  .cp-line .word { display: inline-block; transition: color .12s ease, transform .12s ease; }
+  .cp-line .word.active { color: var(--accent); transform: scale(1.15); }
   .brief-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 12px; font-size: 13px; }
   .archetypes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
   .arch { background: var(--panel-2); padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); }
@@ -290,6 +341,7 @@
 {% endif %}
 <script id="postiz-state" type="application/json">{{ {"configured": postiz_configured, "integrations": postiz_integrations} | tojson }}</script>
 <script id="clip-packages" type="application/json">{{ packages_by_id | tojson }}</script>
+<script id="clip-words" type="application/json">{{ words_by_clip | tojson }}</script>
 {% endblock %}
 
 {% block scripts %}
@@ -400,9 +452,9 @@ async function batchRender(evt, vid) {
   btn.disabled = true; btn.textContent = "Rendering…";
   try {
     const res = await post(`/videos/${vid}/render-approved`, getRenderOptions());
-    alert(`Rendered ${res.count} clip(s).`);
+    Toast.success(`Rendered ${res.count} clip(s).`);
     location.reload();
-  } catch (e) { alert("Render failed: " + e.message); btn.disabled = false; btn.textContent = "Render approved"; }
+  } catch (e) { Toast.error(e.message, "Render failed"); btn.disabled = false; btn.textContent = "Render approved"; }
   return false;
 }
 async function makeThumbnails(id, ev) {
@@ -521,7 +573,7 @@ async function submitSchedule(clipId) {
       kind, when: whenIso,
     });
     Modal.close();
-    alert(`Scheduled ${res.scheduled.length} post(s).`);
+    Toast.success(`Scheduled ${res.scheduled.length} post(s).`);
     location.reload();
   } catch (e) {
     btn.disabled = false; btn.textContent = "Send to Postiz";
@@ -533,12 +585,261 @@ async function cancelSchedule(id, ev) {
   ev.preventDefault();
   if (!confirm("Cancel this scheduled post (on Postiz too)?")) return;
   const r = await fetch(`/api/schedules/${id}`, { method: "DELETE" });
-  if (!r.ok) { alert("Failed: " + await r.text()); return; }
+  if (!r.ok) { Toast.error(await r.text(), "Cancel failed"); return; }
   location.reload();
 }
+
+// --- Waveform scrubber + animated caption preview -------------------------
+const ClipWords = JSON.parse(document.getElementById("clip-words").textContent || "{}");
+
+function clipById(id) { return document.getElementById(`clip-${id}`); }
+
+async function initScrubber(clipId) {
+  const root = document.getElementById(`scrubber-${clipId}`);
+  if (!root || root.dataset.ready) return;
+  root.dataset.ready = "1";
+  const canvas = root.querySelector("canvas.wave");
+  const startH = root.querySelector(".handle.start");
+  const endH = root.querySelector(".handle.end");
+  const rangeEl = root.querySelector(".range");
+  const playhead = root.querySelector(".playhead");
+  const video = document.getElementById(`video-${clipId}`);
+
+  let wf = null, viewStart = 0, viewEnd = 0;
+  try {
+    const r = await fetch(`/api/clips/${clipId}/waveform`);
+    if (!r.ok) throw new Error(await r.text());
+    wf = await r.json();
+    viewStart = wf.view_start;
+    viewEnd = wf.view_end;
+  } catch (e) {
+    const msg = document.createElement("div");
+    msg.className = "muted"; msg.style.padding = "10px";
+    msg.textContent = "Waveform unavailable — numeric inputs still work.";
+    root.innerHTML = ""; root.appendChild(msg); return;
+  }
+  const peaks = wf.waveform.peaks;
+
+  function draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth, cssH = 72;
+    if (canvas.width !== Math.round(cssW * dpr)) {
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    const mid = cssH / 2;
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+    const bucketW = cssW / peaks.length;
+    for (let i = 0; i < peaks.length; i++) {
+      const h = (peaks[i] / 1000) * (cssH * 0.9);
+      ctx.fillRect(i * bucketW, mid - h / 2, Math.max(1, bucketW - 0.5), Math.max(1, h));
+    }
+    const dur = viewEnd - viewStart;
+    const startPx = ((parseFloat(root.dataset.start) - viewStart) / dur) * cssW;
+    const endPx   = ((parseFloat(root.dataset.end) - viewStart) / dur) * cssW;
+    // Highlight selected range on top of wave.
+    ctx.globalCompositeOperation = "source-atop";
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent");
+    ctx.fillStyle = accent;
+    ctx.fillRect(startPx, 0, Math.max(1, endPx - startPx), cssH);
+    ctx.globalCompositeOperation = "source-over";
+  }
+  function positionHandles() {
+    const cssW = canvas.clientWidth;
+    const dur = viewEnd - viewStart;
+    const s = parseFloat(root.dataset.start), e = parseFloat(root.dataset.end);
+    const startPx = ((s - viewStart) / dur) * cssW;
+    const endPx = ((e - viewStart) / dur) * cssW;
+    startH.style.left = `${startPx}px`;
+    endH.style.left = `${endPx}px`;
+    rangeEl.style.left = `${startPx}px`;
+    rangeEl.style.width = `${Math.max(2, endPx - startPx)}px`;
+    const startInput = document.getElementById(`start-${clipId}`);
+    const endInput = document.getElementById(`end-${clipId}`);
+    if (startInput) startInput.value = s.toFixed(2);
+    if (endInput) endInput.value = e.toFixed(2);
+    document.getElementById(`ts-${clipId}`).textContent = fmtTs(s) + " → " + fmtTs(e);
+  }
+  function updatePlayhead() {
+    if (!video) return;
+    const dur = viewEnd - viewStart;
+    const t = video.currentTime;
+    const cssW = canvas.clientWidth;
+    if (t < viewStart || t > viewEnd) { playhead.style.display = "none"; return; }
+    playhead.style.display = "block";
+    playhead.style.left = `${((t - viewStart) / dur) * cssW}px`;
+  }
+  draw(); positionHandles();
+
+  let dragging = null;
+  function pxToTime(px) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, px - rect.left));
+    const dur = viewEnd - viewStart;
+    return viewStart + (x / rect.width) * dur;
+  }
+  function onMove(ev) {
+    if (!dragging) return;
+    const t = pxToTime(ev.clientX);
+    const s = parseFloat(root.dataset.start), e = parseFloat(root.dataset.end);
+    if (dragging === "start") root.dataset.start = Math.min(Math.max(viewStart, t), e - 0.1).toFixed(3);
+    else root.dataset.end = Math.max(Math.min(viewEnd, t), s + 0.1).toFixed(3);
+    positionHandles();
+    draw();
+  }
+  function onUp() { dragging = null; window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); }
+  function grab(which, ev) {
+    dragging = which;
+    ev.preventDefault();
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+  startH.addEventListener("pointerdown", (e) => grab("start", e));
+  endH.addEventListener("pointerdown", (e) => grab("end", e));
+
+  // Click the wave to scrub the video.
+  canvas.addEventListener("click", (ev) => {
+    if (!video) return;
+    video.currentTime = pxToTime(ev.clientX);
+  });
+
+  if (video) {
+    video.addEventListener("timeupdate", updatePlayhead);
+  }
+
+  // Keyboard nudges while hovering a scrubber.
+  root.tabIndex = 0;
+  root.addEventListener("keydown", (ev) => {
+    let step = 0.1;
+    if (ev.shiftKey) step = 1.0;
+    let handled = true;
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+      const dir = ev.key === "ArrowLeft" ? -1 : 1;
+      // Which handle? Last focused / default to end.
+      const which = (document.activeElement === startH) ? "start" : "end";
+      const cur = parseFloat(root.dataset[which]);
+      const s = parseFloat(root.dataset.start), e = parseFloat(root.dataset.end);
+      const next = which === "start"
+        ? Math.min(Math.max(viewStart, cur + dir * step), e - 0.1)
+        : Math.max(Math.min(viewEnd, cur + dir * step), s + 0.1);
+      root.dataset[which] = next.toFixed(3);
+      positionHandles(); draw();
+    } else if (ev.key === "j") { video.currentTime = Math.max(viewStart, video.currentTime - 2); }
+    else if (ev.key === "k" || ev.key === " ") { video.paused ? video.play() : video.pause(); }
+    else if (ev.key === "l") { video.currentTime = Math.min(viewEnd, video.currentTime + 2); }
+    else handled = false;
+    if (handled) ev.preventDefault();
+  });
+  window.addEventListener("resize", () => { draw(); positionHandles(); });
+}
+
+// Save-on-blur — whenever the scrubber's dataset.start/end differ from server.
+function wireScrubSaveOnBlur(clipId) {
+  const root = document.getElementById(`scrubber-${clipId}`);
+  if (!root) return;
+  let lastSaved = { s: parseFloat(root.dataset.start), e: parseFloat(root.dataset.end) };
+  root.addEventListener("pointerup", async () => {
+    const s = parseFloat(root.dataset.start), e = parseFloat(root.dataset.end);
+    if (Math.abs(s - lastSaved.s) < 0.001 && Math.abs(e - lastSaved.e) < 0.001) return;
+    lastSaved = { s, e };
+    try {
+      const titleInput = document.getElementById(`title-${clipId}`);
+      await post(`/clips/${clipId}/update`, { start: s, end: e, title: titleInput?.value || "", reason: "scrubber" });
+      Toast.success(`${fmtTs(s)} → ${fmtTs(e)}`, "Boundaries saved");
+    } catch (err) { Toast.error(err.message, "Save failed"); }
+  });
+}
+
+// --- Animated caption preview ---------------------------------------------
+function initCaptionPreview(clipId) {
+  const words = ClipWords[String(clipId)] || [];
+  const video = document.getElementById(`video-${clipId}`);
+  const line = document.getElementById(`cpline-${clipId}`);
+  if (!words.length || !line || !video) return;
+  // Group words into 3-4 word phrases.
+  const phrases = [];
+  let buf = [];
+  for (const w of words) {
+    buf.push(w);
+    if (buf.length >= 4 || /[.!?]$/.test(w.text)) { phrases.push(buf); buf = []; }
+  }
+  if (buf.length) phrases.push(buf);
+
+  function render(phrase, activeIdx) {
+    line.innerHTML = "";
+    phrase.forEach((w, i) => {
+      const span = document.createElement("span");
+      span.className = "word" + (i === activeIdx ? " active" : "");
+      span.textContent = w.text;
+      line.appendChild(span);
+      line.appendChild(document.createTextNode(" "));
+    });
+  }
+  function tick() {
+    const t = video.currentTime;
+    let activePhrase = phrases[0], activeIdx = 0;
+    for (const p of phrases) {
+      if (t >= p[0].start - 0.1 && t <= p[p.length - 1].end + 0.1) {
+        activePhrase = p;
+        break;
+      }
+    }
+    if (!activePhrase) activePhrase = phrases[0];
+    activePhrase.forEach((w, i) => {
+      if (t >= w.start && t <= w.end + 0.05) activeIdx = i;
+    });
+    render(activePhrase, activeIdx);
+  }
+  video.addEventListener("timeupdate", tick);
+  tick();
+}
+
+document.querySelectorAll(".scrubber").forEach((el) => {
+  const id = parseInt(el.dataset.clipId, 10);
+  initScrubber(id);
+  wireScrubSaveOnBlur(id);
+});
+document.querySelectorAll(".caption-preview-box").forEach((el) => {
+  const m = el.id.match(/cappreview-(\d+)/);
+  if (m) initCaptionPreview(parseInt(m[1], 10));
+});
 async function rescore(videoId, slug) {
   const res = await post("/api/rescore", { video_id: videoId });
   JobDrawer.watch(res.job_id, `Re-produce: ${slug}`);
+}
+
+async function undoModal(videoId) {
+  const r = await fetch(`/api/videos/${videoId}/snapshots`);
+  const { snapshots } = await r.json();
+  if (!snapshots.length) { Toast.info("No snapshots yet."); return; }
+  const items = snapshots.map(s =>
+    el("div", { class: "row", style: "padding: 8px 0; border-top: 1px solid var(--border);" },
+      el("div", { class: "grow" },
+        el("strong", {}, s.label || `Snapshot ${s.id}`),
+        el("div", { class: "muted", style: "font-size: 12px;" }, s.created_at),
+      ),
+      el("button", { class: "btn primary", onclick: () => restoreSnapshot(s.id) }, "Restore"),
+    ),
+  );
+  const body = el("div", {},
+    el("h3", {}, "Undo — restore a snapshot"),
+    el("p", { class: "muted" }, "Each re-run of the agents saves a snapshot of the prior clip set. Restoring wipes the current set."),
+    ...items,
+    el("div", { class: "toolbar", style: "justify-content: flex-end; margin-top: 10px;" },
+      el("button", { class: "btn", onclick: () => Modal.close() }, "Cancel"),
+    ),
+  );
+  Modal.open(body);
+}
+async function restoreSnapshot(id) {
+  if (!confirm("Restore this snapshot? Current clip set will be replaced.")) return;
+  const r = await fetch(`/api/snapshots/${id}/restore`, { method: "POST" });
+  if (!r.ok) { Toast.error(await r.text(), "Restore failed"); return; }
+  Toast.success("Snapshot restored.");
+  setTimeout(() => location.reload(), 400);
 }
 </script>
 {% endblock %}
