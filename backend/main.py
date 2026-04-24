@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 import json
 import uuid
-from typing import Dict, List
+from typing import Dict, List, Optional
 import logging
 from datetime import datetime
 
@@ -14,6 +14,13 @@ from .consultant_engine import ConsultantEngine
 from .models import (
     SessionCreate, AnalysisRequest, ConsultantMode,
     WebRTCSignal, Session
+)
+from .social_studio import get_service as get_social_studio
+from .social_studio.models import (
+    BrandBrief,
+    GenerateMockupsRequest,
+    VoteBatch,
+    BuildAssetsRequest,
 )
 
 # Load environment variables
@@ -324,6 +331,133 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error: {str(e)}")
         manager.disconnect(websocket, session_id)
+
+
+# ============================================================================
+# Social Media Asset Studio
+# ============================================================================
+
+@app.get("/studio")
+async def studio_page():
+    """Serve the Social Media Asset Studio UI."""
+    try:
+        with open("frontend/studio.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Social Studio</h1><p>frontend/studio.html not found.</p>",
+            status_code=404,
+        )
+
+
+@app.post("/api/social/projects")
+async def social_create_project(brief: BrandBrief):
+    """Create a new studio project from a brand brief."""
+    project = get_social_studio().create_project(brief)
+    return {"project_id": project.id, "status": project.status}
+
+
+@app.post("/api/social/projects/{project_id}/research")
+async def social_research(project_id: str):
+    """Run Google Search-grounded brand research via Gemini."""
+    try:
+        report = await get_social_studio().run_research(project_id)
+        return report
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+    except Exception as e:
+        logger.exception("research failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/projects/{project_id}/style-guide")
+async def social_style_guide(project_id: str):
+    """Generate a structured brand style guide."""
+    try:
+        guide = await get_social_studio().run_style_guide(project_id)
+        return guide
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+    except Exception as e:
+        logger.exception("style guide failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/projects/{project_id}/mockups")
+async def social_generate_mockups(project_id: str, request: GenerateMockupsRequest):
+    """Generate up to 16 image mockups using OpenAI gpt-image-1."""
+    try:
+        assets = await get_social_studio().generate_mockups(
+            project_id,
+            count=request.count,
+            platforms=request.platforms,
+        )
+        return {"mockups": [a.model_dump(mode="json") for a in assets]}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+    except Exception as e:
+        logger.exception("mockup generation failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/projects/{project_id}")
+async def social_get_project(project_id: str):
+    """Return the full project state."""
+    project = get_social_studio().get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    return project.model_dump(mode="json")
+
+
+@app.get("/api/social/projects/{project_id}/mockups/{mockup_id}/image")
+async def social_mockup_image(project_id: str, mockup_id: str):
+    path = get_social_studio().mockup_image_path(project_id, mockup_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.post("/api/social/projects/{project_id}/vote")
+async def social_vote(project_id: str, batch: VoteBatch):
+    """Submit a batch of votes. Returns mockups ranked by score."""
+    try:
+        mockups = get_social_studio().apply_votes(project_id, batch.votes)
+        return {"mockups": [m.model_dump(mode="json") for m in mockups]}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+@app.post("/api/social/projects/{project_id}/build")
+async def social_build(project_id: str, request: BuildAssetsRequest):
+    """Turn voted mockups into shippable HTML/CSS + ZIP bundles."""
+    try:
+        built = get_social_studio().build_assets(project_id, request.mockup_ids)
+        return {
+            "built": [b.model_dump(mode="json") for b in built],
+            "all_download_url": f"/api/social/projects/{project_id}/built/all-assets.zip",
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("build failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/projects/{project_id}/built/{slug}.zip")
+async def social_download_zip(project_id: str, slug: str):
+    if slug == "all-assets":
+        path = get_social_studio().all_assets_zip_path(project_id)
+    else:
+        path = get_social_studio().built_zip_path(project_id, slug)
+    if not path:
+        raise HTTPException(status_code=404, detail="zip not found")
+    return FileResponse(
+        str(path),
+        media_type="application/zip",
+        filename=path.name,
+    )
 
 
 # Serve frontend static files

@@ -51,6 +51,10 @@ recordings/
 *.mp4
 *.webm
 
+# Social Media Asset Studio generated assets
+data/
+data/social_assets/
+
 # Temporary files
 tmp/
 temp/
