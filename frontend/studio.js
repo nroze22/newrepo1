@@ -8,6 +8,14 @@
     vote:       (id, body) => fetchJSON(`/api/social/projects/${id}/vote`, { method: "POST", body }),
     updateMockup: (id, mid, body) => fetchJSON(`/api/social/projects/${id}/mockups/${mid}`, { method: "PATCH", body }),
     regenerate: (id, mid, body)   => fetchJSON(`/api/social/projects/${id}/mockups/${mid}/regenerate`, { method: "POST", body: body || {} }),
+    kit:        (id, mid, body)   => fetchJSON(`/api/social/projects/${id}/mockups/${mid}/kit`, { method: "POST", body: body || {} }),
+    uploadLogo: async (id, file) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`/api/social/projects/${id}/logo`, { method: "POST", body: fd });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      return res.json();
+    },
     build:      (id, body) => fetchJSON(`/api/social/projects/${id}/build`, { method: "POST", body }),
   };
 
@@ -19,6 +27,9 @@
     votes: new Map(), // mockup_id -> { value, heart, reject }
     refinePicks: [],
     originalConcepts: new Map(), // mockup_id -> snapshot of text fields
+    logoUrl: null,
+    pendingLogoFile: null, // holds logo selected before a project exists
+    voteFocusIdx: 0,
   };
 
   // ---------------------------------------------------------------------
@@ -40,6 +51,28 @@
   // ---------------------------------------------------------------------
   // Step 1: brief
   // ---------------------------------------------------------------------
+  // Logo picker (runs before project is created - file is held and uploaded after)
+  const logoInput = document.getElementById("logoInput");
+  const logoPreview = document.getElementById("logoPreview");
+  const logoClear = document.getElementById("logoClear");
+  logoInput.addEventListener("change", () => {
+    const file = logoInput.files && logoInput.files[0];
+    if (!file) return;
+    state.pendingLogoFile = file;
+    const url = URL.createObjectURL(file);
+    logoPreview.innerHTML = `<img src="${url}" alt="">`;
+    logoPreview.classList.add("has-image");
+    logoClear.hidden = false;
+  });
+  logoClear.addEventListener("click", () => {
+    state.pendingLogoFile = null;
+    logoInput.value = "";
+    logoPreview.innerHTML = "";
+    logoPreview.classList.remove("has-image");
+    logoClear.hidden = true;
+    state.logoUrl = null;
+  });
+
   document.getElementById("briefForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -67,6 +100,15 @@
       setButtonBusy(e.target.querySelector("button[type=submit]"), true, "Creating project…");
       const created = await api.create(brief);
       state.projectId = created.project_id;
+      // Upload logo if one was selected
+      if (state.pendingLogoFile) {
+        try {
+          const logo = await api.uploadLogo(state.projectId, state.pendingLogoFile);
+          state.logoUrl = logo.url;
+        } catch (err) {
+          console.warn("logo upload failed", err);
+        }
+      }
       markDone("brief");
       go("research");
       await runResearchFlow();
@@ -271,6 +313,7 @@
     markDone("collage");
     go("vote");
     renderVoting(state.mockups);
+    enableVoteShortcuts();
   });
 
   // ---------------------------------------------------------------------
@@ -285,6 +328,7 @@
       const v = state.votes.get(id);
       const card = document.createElement("div");
       card.className = "vote-card";
+      card.dataset.id = id;
       card.innerHTML = `
         <div class="vote-card__img"><img src="${m.image_url}" alt=""></div>
         <div class="vote-card__body">
@@ -326,6 +370,58 @@
       grid.appendChild(card);
     });
     updateVoteStatus();
+  }
+
+  let voteKeyHandler = null;
+  function enableVoteShortcuts() {
+    if (voteKeyHandler) return;
+    voteKeyHandler = (e) => {
+      // Only when on the vote step and not typing in an input
+      const inVote = !document.querySelector('.step[data-step="vote"]').hidden;
+      if (!inVote) return;
+      const tag = (e.target && e.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || e.metaKey || e.ctrlKey) return;
+
+      const cards = [...document.querySelectorAll("#votingGrid .vote-card")];
+      if (!cards.length) return;
+      // Clamp focus index
+      state.voteFocusIdx = Math.min(Math.max(state.voteFocusIdx, 0), cards.length - 1);
+      const focus = cards[state.voteFocusIdx];
+      const id = focus.dataset.id;
+      const v = state.votes.get(id) || { value: 0, heart: false, reject: false };
+      let handled = true;
+      switch (e.key.toLowerCase()) {
+        case "j":
+        case "arrowright":
+          state.voteFocusIdx = Math.min(state.voteFocusIdx + 1, cards.length - 1); break;
+        case "k":
+        case "arrowleft":
+          state.voteFocusIdx = Math.max(state.voteFocusIdx - 1, 0); break;
+        case "l":
+          v.heart = !v.heart; if (v.heart) { v.value = Math.max(v.value, 4); v.reject = false; }
+          state.votes.set(id, v); break;
+        case "x":
+          v.reject = !v.reject; if (v.reject) { v.value = -1; v.heart = false; }
+          else if (v.value < 0) v.value = 0;
+          state.votes.set(id, v); break;
+        case "1": case "2": case "3": case "4": case "5":
+          const n = parseInt(e.key, 10);
+          v.value = v.value === n ? 0 : n; v.reject = false;
+          state.votes.set(id, v); break;
+        default: handled = false;
+      }
+      if (handled) {
+        e.preventDefault();
+        renderVoting(state.mockups);
+        // Re-find focused card and scroll into view
+        const redrawn = document.querySelectorAll("#votingGrid .vote-card");
+        redrawn.forEach((c, i) => c.classList.toggle("is-focus", i === state.voteFocusIdx));
+        if (redrawn[state.voteFocusIdx]) {
+          redrawn[state.voteFocusIdx].scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+      }
+    };
+    window.addEventListener("keydown", voteKeyHandler);
   }
 
   function updateVoteStatus() {
@@ -396,6 +492,15 @@
       const vote = state.votes.get(id) || {};
       const aspectClass = m.width > m.height * 1.2 ? "is-wide" : (m.height > m.width * 1.2 ? "is-tall" : "");
 
+      const variants = m.concept.variants || [];
+      const variantChips = variants.map((v, vi) =>
+        `<button class="variant-chip" data-variant="${vi}" title="${escape(v.headline)}">Variant ${vi + 2}</button>`
+      ).join("");
+      const logoHtml = state.logoUrl
+        ? `<img class="refine-card__logo" src="${state.logoUrl}?v=${Date.now()}" alt="">`
+        : "";
+      const hashtags = (m.concept.hashtags || []).map((h) => `#${h.replace(/^#/, '')}`).join(" ");
+
       const card = document.createElement("div");
       card.className = "refine-card";
       card.dataset.id = id;
@@ -403,6 +508,7 @@
         <div class="refine-card__preview ${aspectClass}">
           <img class="refine-card__bg" src="${m.image_url}" alt="">
           <div class="refine-card__scrim"></div>
+          ${logoHtml}
           <div class="refine-card__text">
             <h3 data-bind="headline" style="font-family:'${display}',sans-serif">${escape(m.concept.headline)}</h3>
             <p data-bind="subheadline">${escape(m.concept.subheadline || "")}</p>
@@ -431,13 +537,32 @@
             <label>Call to action</label>
             <input data-field="cta" value="${escape(m.concept.cta)}" />
           </div>
+          ${variants.length ? `
           <div class="refine-field">
-            <label>Caption / body copy</label>
-            <textarea data-field="body_copy">${escape(m.concept.body_copy || '')}</textarea>
+            <label>Copy variants (A/B)</label>
+            <div class="variants">
+              <button class="variant-chip is-active" data-variant="primary">Primary</button>
+              ${variantChips}
+            </div>
+          </div>` : ''}
+          <div class="caption-block">
+            <label>Caption</label>
+            <textarea data-field="caption">${escape(m.concept.caption || m.concept.body_copy || '')}</textarea>
+            ${hashtags ? `<div class="hashtags">${escape(hashtags)}</div>` : ''}
+            ${m.concept.alt_text ? `<div class="alt"><strong>Alt:</strong> ${escape(m.concept.alt_text)}</div>` : ''}
           </div>
           <div class="refine-field">
             <label>Image prompt (edit then regenerate)</label>
             <textarea data-field="visual_prompt">${escape(m.concept.visual_prompt)}</textarea>
+          </div>
+          <div class="kit-strip">
+            <div class="kit-strip__header">
+              <h4>Campaign kit — multi-format</h4>
+              <button class="primary" data-act="kit">+ Adapt to all platforms</button>
+            </div>
+            <div class="kit-strip__row" data-role="kit-row">
+              ${(m.kit || []).map((k) => kitTileHtml(k)).join("")}
+            </div>
           </div>
           <div class="refine-card__actions">
             <button data-act="reset">Reset text</button>
@@ -448,6 +573,14 @@
       wireRefineCard(card, m);
       grid.appendChild(card);
     });
+  }
+
+  function kitTileHtml(asset) {
+    const label = (asset.concept.platform || "").replace(/_/g, " ");
+    return `<div class="kit-tile" title="${escape(label)}">
+      <img src="${asset.image_url}" alt="">
+      <span class="kit-tile__label">${escape(label)}</span>
+    </div>`;
   }
 
   function wireRefineCard(card, mockup) {
@@ -477,6 +610,56 @@
         }, 500);
         saveTimers.set(id + ":" + field, t);
       });
+    });
+
+    // Variant swapping
+    card.querySelectorAll(".variant-chip").forEach((chip) => {
+      chip.addEventListener("click", async () => {
+        card.querySelectorAll(".variant-chip").forEach((c) => c.classList.remove("is-active"));
+        chip.classList.add("is-active");
+        const key = chip.dataset.variant;
+        let next;
+        if (key === "primary") {
+          const orig = state.originalConcepts.get(id);
+          if (!orig) return;
+          next = { headline: orig.headline, subheadline: orig.subheadline, cta: orig.cta };
+        } else {
+          const v = (mockup.concept.variants || [])[parseInt(key, 10)];
+          if (!v) return;
+          next = { headline: v.headline, subheadline: v.subheadline || "", cta: v.cta };
+        }
+        // Update inputs + overlay
+        const setField = (name, val) => {
+          const inp = card.querySelector(`[data-field="${name}"]`);
+          if (inp) inp.value = val || "";
+          const bound = card.querySelector(`[data-bind="${name}"]`);
+          if (bound) bound.textContent = val || "";
+          mockup.concept[name] = val;
+        };
+        setField("headline", next.headline);
+        setField("subheadline", next.subheadline);
+        setField("cta", next.cta);
+        try { await api.updateMockup(state.projectId, id, next); } catch (_) {}
+      });
+    });
+
+    // Campaign Kit button
+    const kitBtn = card.querySelector('[data-act="kit"]');
+    if (kitBtn) kitBtn.addEventListener("click", async () => {
+      kitBtn.disabled = true;
+      const originalLabel = kitBtn.textContent;
+      kitBtn.textContent = "Adapting…";
+      try {
+        const { kit } = await api.kit(state.projectId, id, {});
+        mockup.kit = kit;
+        const row = card.querySelector('[data-role="kit-row"]');
+        row.innerHTML = kit.map((k) => kitTileHtml(k)).join("");
+      } catch (err) {
+        alert("Kit adaptation failed: " + err.message);
+      } finally {
+        kitBtn.disabled = false;
+        kitBtn.textContent = originalLabel;
+      }
     });
 
     card.querySelector('[data-act="regen"]').addEventListener("click", async (e) => {
@@ -539,16 +722,25 @@
   function renderBuilt(result) {
     const grid = document.getElementById("builtGrid");
     grid.innerHTML = "";
-    const byId = new Map(state.mockups.map((m) => [m.concept.id, m]));
+    // Index every mockup + every kit sibling by id
+    const byId = new Map();
+    state.mockups.forEach((m) => {
+      byId.set(m.concept.id, m);
+      (m.kit || []).forEach((k) => byId.set(k.concept.id, k));
+    });
     (result.built || []).forEach((b) => {
       const m = byId.get(b.mockup_id);
+      const tags = m && m.concept.hashtags && m.concept.hashtags.length
+        ? `<div class="muted" style="font-size:11px;color:#7ab7ff">${m.concept.hashtags.map((h) => '#' + h.replace(/^#/, '')).join(' ')}</div>`
+        : "";
       const card = document.createElement("div");
       card.className = "built-card";
       card.innerHTML = `
         <div class="built-card__img"><img src="${m ? m.image_url : ''}" alt=""></div>
         <div class="built-card__body">
           <div class="built-card__title">${m ? escape(m.concept.headline) : 'Asset'}</div>
-          <div class="muted">${m ? escape((m.concept.platform || '').replace(/_/g, ' ')) : ''}</div>
+          <div class="muted">${m ? escape((m.concept.platform || '').replace(/_/g, ' ')) : ''}${m && m.kit_parent_id ? ' · kit' : ''}</div>
+          ${tags}
           <div class="built-card__row">
             <a class="primary" href="${b.download_url}" download>⬇ ZIP</a>
           </div>

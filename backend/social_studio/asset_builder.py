@@ -58,13 +58,20 @@ class AssetBuilder:
         project_id: str,
         mockups: List[MockupAsset],
         style_guide: StyleGuide,
+        logo_path: Optional[str] = None,
     ) -> List[BuiltAsset]:
         out_dir = self.asset_dir / project_id / "built"
         out_dir.mkdir(parents=True, exist_ok=True)
         built: List[BuiltAsset] = []
-        for mockup in mockups:
+        # Expand kits - if a mockup has siblings, build each one too.
+        expanded: List[MockupAsset] = []
+        for m in mockups:
+            expanded.append(m)
+            for sibling in (m.kit or []):
+                expanded.append(sibling)
+        for mockup in expanded:
             try:
-                built.append(self._build_one(project_id, mockup, style_guide, out_dir))
+                built.append(self._build_one(project_id, mockup, style_guide, out_dir, logo_path))
             except Exception as exc:
                 logger.exception("Asset build failed for %s: %s", mockup.concept.id, exc)
         # Bundle the collection into a master zip too
@@ -78,10 +85,11 @@ class AssetBuilder:
         mockup: MockupAsset,
         style_guide: StyleGuide,
         out_dir: Path,
+        logo_path: Optional[str] = None,
     ) -> BuiltAsset:
         concept = mockup.concept
         spec = PLATFORM_SPECS[concept.platform]
-        slug = _safe_slug(f"{concept.campaign}-{concept.mood or concept.platform}-{concept.id[:6]}")
+        slug = _safe_slug(f"{concept.campaign}-{concept.platform}-{concept.mood or 'post'}-{concept.id[:6]}")
         asset_dir = out_dir / slug
         asset_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,6 +97,13 @@ class AssetBuilder:
         bg_src = Path(mockup.image_path)
         bg_dst = asset_dir / "background.png"
         shutil.copyfile(bg_src, bg_dst)
+
+        # Copy logo if provided
+        logo_rel: Optional[str] = None
+        if logo_path and Path(logo_path).exists():
+            logo_dst = asset_dir / "logo.png"
+            shutil.copyfile(logo_path, logo_dst)
+            logo_rel = "logo.png"
 
         # Pick fonts from style guide
         display_font = next(
@@ -123,6 +138,7 @@ class AssetBuilder:
             primary_hex=primary_hex,
             accent_hex=accent_hex,
             on_accent=on_accent,
+            logo_rel=logo_rel,
         )
         css = self._render_css(
             spec=spec,
@@ -135,10 +151,16 @@ class AssetBuilder:
 
         (asset_dir / "post.html").write_text(html, encoding="utf-8")
         (asset_dir / "styles.css").write_text(css, encoding="utf-8")
+        # Ship caption + hashtags + alt text alongside the image
+        caption_md = self._render_caption_md(concept)
+        (asset_dir / "caption.md").write_text(caption_md, encoding="utf-8")
 
         # Flat render for direct posting
         render_path = asset_dir / "render.png"
-        self._render_flat_png(bg_dst, render_path, concept, spec, primary_hex, accent_hex, on_accent)
+        self._render_flat_png(
+            bg_dst, render_path, concept, spec, primary_hex, accent_hex, on_accent,
+            logo_path=Path(logo_path) if logo_rel else None,
+        )
 
         # Per-asset zip
         zip_path = asset_dir.with_suffix(".zip")
@@ -165,6 +187,23 @@ class AssetBuilder:
                     zf.write(p, arcname=f"{folder.name}/{p.name}")
         return all_zip
 
+    def _render_caption_md(self, concept) -> str:
+        lines = [f"# {concept.headline}"]
+        if concept.subheadline:
+            lines.append(f"_{concept.subheadline}_")
+        lines.append("")
+        if concept.caption:
+            lines.append(concept.caption)
+        elif concept.body_copy:
+            lines.append(concept.body_copy)
+        if concept.hashtags:
+            lines.append("")
+            lines.append(" ".join(f"#{h.lstrip('#')}" for h in concept.hashtags))
+        if concept.alt_text:
+            lines.append("")
+            lines.append(f"**Alt text:** {concept.alt_text}")
+        return "\n".join(lines) + "\n"
+
     def _render_html(
         self,
         concept,
@@ -174,11 +213,18 @@ class AssetBuilder:
         primary_hex: str,
         accent_hex: str,
         on_accent: str,
+        logo_rel: Optional[str] = None,
     ) -> str:
         title = _escape_html(concept.headline)
         sub = _escape_html(concept.subheadline or "")
         cta = _escape_html(concept.cta)
         body = _escape_html(concept.body_copy or "")
+        alt = _escape_html(concept.alt_text or "")
+        caption_html = _escape_html(concept.caption or body)
+        hashtag_html = " ".join(f"#{_escape_html(h.lstrip('#'))}" for h in (concept.hashtags or []))
+        logo_html = (
+            f'<img class="post__logo" src="{logo_rel}" alt="" />' if logo_rel else ''
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -193,8 +239,9 @@ class AssetBuilder:
 <body>
   <!-- Platform: {spec['label']} ({spec['w']}x{spec['h']}) -->
   <article class="post post--{concept.platform}" contenteditable="true" spellcheck="false">
-    <img class="post__bg" src="background.png" alt="" />
+    <img class="post__bg" src="background.png" alt="{alt}" />
     <div class="post__scrim"></div>
+    {logo_html}
     <header class="post__header">
       <h1 class="post__headline">{title}</h1>
       {f'<p class="post__subheadline">{sub}</p>' if sub else ''}
@@ -203,7 +250,12 @@ class AssetBuilder:
       <span class="post__cta">{cta}</span>
     </footer>
   </article>
-  {f'<p class="post__caption" contenteditable="true">{body}</p>' if body else ''}
+  <section class="post-meta">
+    <h2>Caption</h2>
+    <p contenteditable="true">{caption_html}</p>
+    {f'<p class="post-meta__tags">{hashtag_html}</p>' if hashtag_html else ''}
+    {f'<p class="post-meta__alt"><strong>Alt text:</strong> {alt}</p>' if alt else ''}
+  </section>
 </body>
 </html>
 """
@@ -295,12 +347,39 @@ body {{
   font-size: clamp(14px, 1.6vw, 18px);
   letter-spacing: .02em;
 }}
-.post__caption {{
-  margin-top: 16px;
+.post__logo {{
+  position: absolute;
+  top: 6%; right: 6%;
+  z-index: 3;
+  max-height: 10%;
+  max-width: 24%;
+  width: auto;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.35));
+}}
+.post-meta {{
+  margin-top: 20px;
   max-width: var(--post-w);
+  width: 100%;
+  color: #d7d9e1;
   font-size: 15px;
-  color: #ddd;
-  line-height: 1.5;
+  line-height: 1.55;
+}}
+.post-meta h2 {{
+  font-family: '{display_family}', sans-serif;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: #8a90a0;
+  margin: 0 0 8px;
+}}
+.post-meta__tags {{
+  color: #7ab7ff;
+  font-size: 13px;
+}}
+.post-meta__alt {{
+  color: #9aa0ae;
+  font-size: 12px;
+  margin-top: 4px;
 }}
 """
 
@@ -313,6 +392,7 @@ body {{
         primary_hex: str,
         accent_hex: str,
         on_accent: str,
+        logo_path: Optional[Path] = None,
     ) -> None:
         """Bake text into a flat PNG for posting. Uses PIL default font -
         real typefaces live in the HTML version."""
@@ -372,6 +452,26 @@ body {{
             fill=text_fill,
             font=cta_font,
         )
+
+        # Composite logo in the top-right corner (with a soft shadow)
+        if logo_path and logo_path.exists():
+            try:
+                logo = Image.open(logo_path).convert("RGBA")
+                max_h = int(h * 0.08)
+                max_w = int(w * 0.22)
+                ratio = min(max_h / logo.height, max_w / logo.width)
+                if ratio < 1:
+                    logo = logo.resize(
+                        (int(logo.width * ratio), int(logo.height * ratio)), Image.LANCZOS
+                    )
+                pad = int(w * 0.04)
+                x = w - logo.width - pad
+                y = pad
+                img_rgba = img.convert("RGBA")
+                img_rgba.alpha_composite(logo, (x, y))
+                img = img_rgba.convert("RGB")
+            except Exception as exc:
+                logger.warning("Logo compositing failed: %s", exc)
 
         img.save(out_path, format="PNG", optimize=True)
 

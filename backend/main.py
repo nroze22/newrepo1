@@ -23,6 +23,7 @@ from .social_studio.models import (
     BuildAssetsRequest,
     MockupUpdate,
     RegenerateImageRequest,
+    GenerateKitRequest,
 )
 
 # Load environment variables
@@ -455,6 +456,44 @@ async def social_regenerate_mockup(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.exception("regenerate failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/projects/{project_id}/logo")
+async def social_upload_logo(project_id: str, file: UploadFile = File(...)):
+    """Upload a brand logo. PNG/JPG/SVG-rasterized will be normalized to PNG."""
+    data = await file.read()
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="logo too large (max 8MB)")
+    try:
+        logo = get_social_studio().set_logo(project_id, file.filename or "logo", data)
+        return logo.model_dump(mode="json")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="project not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/social/projects/{project_id}/logo")
+async def social_get_logo(project_id: str):
+    path = get_social_studio().logo_path(project_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="no logo uploaded")
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.post("/api/social/projects/{project_id}/mockups/{mockup_id}/kit")
+async def social_generate_kit(project_id: str, mockup_id: str, request: GenerateKitRequest):
+    """Campaign Kit: adapt a mockup across multiple platforms."""
+    try:
+        kit = await get_social_studio().adapt_mockup_to_platforms(
+            project_id, mockup_id, platforms=request.platforms
+        )
+        return {"kit": [k.model_dump(mode="json") for k in kit]}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("kit adaptation failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -88,6 +88,18 @@
             <label class="chip chip--choice"><input type="checkbox" value="pinterest_pin" /> Pinterest</label>
           </div>
         </fieldset>
+        <fieldset class="span-2 logo-field">
+          <legend>Brand logo (optional)</legend>
+          <div class="logo-uploader" id="logoUploader">
+            <div class="logo-uploader__preview" id="logoPreview" aria-label="Logo preview"></div>
+            <div class="logo-uploader__actions">
+              <label class="btn btn--ghost" for="logoInput">Upload logo</label>
+              <input type="file" id="logoInput" accept="image/png,image/jpeg,image/webp" hidden />
+              <button type="button" class="btn btn--ghost" id="logoClear" hidden>Remove</button>
+              <span class="muted">PNG or JPG · appears in previews and ships in every asset.</span>
+            </div>
+          </div>
+        </fieldset>
         <div class="form__foot span-2">
           <button type="submit" class="btn btn--primary">Start research →</button>
         </div>
@@ -203,7 +215,7 @@
     <section class="step" data-step="vote" hidden>
       <header class="step__head">
         <h1>Which concepts win?</h1>
-        <p>Tap ♥ to love, ✕ to reject, or 1-5 ⭐ to rank. Your top picks become shippable assets.</p>
+        <p>Tap ♥ to love, ✕ to reject, or 1-5 ⭐ to rank. Or use the keyboard: <kbd>J</kbd>/<kbd>K</kbd> navigate · <kbd>L</kbd> love · <kbd>X</kbd> pass · <kbd>1</kbd>-<kbd>5</kbd> stars.</p>
       </header>
       <div class="voting" id="votingGrid"></div>
       <div class="step__foot">

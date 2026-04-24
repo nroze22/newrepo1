@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .models import (
     BrandBrief,
+    CopyVariant,
     MockupAsset,
     MockupConcept,
     Platform,
@@ -43,10 +44,14 @@ Each concept must include:
 - "headline": max 6 words, punchy
 - "subheadline": optional supporting line, max 10 words
 - "cta": verb-first call to action, max 4 words
-- "body_copy": optional short paragraph (<= 180 chars) for feed caption
+- "body_copy": optional short paragraph (<= 180 chars) suitable as a feed caption
 - "visual_prompt": a vivid 2-4 sentence prompt for an image model. Include subject, setting, lighting, composition, mood, and specific brand colors. DO NOT include any text or typography instructions in the visual prompt - text will be overlaid separately.
 - "palette": list of 2-4 hex strings drawn from the brand palette that should dominate the image
 - "mood": one-word mood descriptor
+- "variants": array of exactly 2 alternate copy sets for A/B testing, each with {"headline","subheadline","cta"}. Variants should differ meaningfully from the primary (different angle, different hook) while staying on-brand.
+- "caption": platform-native caption (IG/LinkedIn = ~2 sentences warm and informative; X = <= 240 chars with a hook; TikTok = 1 hooky sentence). DIFFERENT from the body_copy - this is the in-feed post text.
+- "hashtags": 5-8 relevant hashtags as short strings WITHOUT the # prefix.
+- "alt_text": single-sentence accessibility description of the image for screen readers.
 
 Vary dramatically across concepts - different subjects, settings, crops, energy levels."""
 
@@ -165,6 +170,22 @@ Campaign theme: {brief.campaign_theme or 'none'}
             platform = raw.get("platform") or platforms[0]
             if platform not in PLATFORM_SPECS:
                 platform = platforms[0]
+            variants = []
+            for v in raw.get("variants", []) or []:
+                if not isinstance(v, dict):
+                    continue
+                variants.append(
+                    CopyVariant(
+                        headline=(v.get("headline") or "").strip() or "",
+                        subheadline=v.get("subheadline"),
+                        cta=(v.get("cta") or "").strip() or "Learn more",
+                    )
+                )
+            hashtags = [
+                h.lstrip("#").strip()
+                for h in (raw.get("hashtags") or [])
+                if isinstance(h, str) and h.strip()
+            ][:10]
             concepts.append(
                 MockupConcept(
                     id=str(uuid.uuid4()),
@@ -177,6 +198,10 @@ Campaign theme: {brief.campaign_theme or 'none'}
                     visual_prompt=raw.get("visual_prompt", ""),
                     palette=[p for p in raw.get("palette", []) if isinstance(p, str)][:4],
                     mood=raw.get("mood", ""),
+                    variants=variants[:3],
+                    caption=raw.get("caption"),
+                    hashtags=hashtags,
+                    alt_text=raw.get("alt_text"),
                 )
             )
         return concepts
@@ -196,14 +221,37 @@ Campaign theme: {brief.campaign_theme or 'none'}
             campaign = campaigns[i % max(len(campaigns), 1)] if campaigns else None
             platform = platforms[i % len(platforms)]
             headline = (campaign.hook if campaign else f"{brief.company_name} is here")[:48]
+            subheadline = (campaign.narrative[:80] if campaign else brief.goals[:80])
+            primary_cta = campaign.primary_cta if campaign else "Learn more"
+            # simple mechanical variants so UX is still demonstrable offline
+            alt_ctas = ["Try it today", "See how", "Start free", "Book a demo"]
+            variants = [
+                CopyVariant(
+                    headline=f"{brief.company_name} that actually delivers",
+                    subheadline=brief.goals[:70],
+                    cta=alt_ctas[i % len(alt_ctas)],
+                ),
+                CopyVariant(
+                    headline=(campaign.title if campaign else "Made for you"),
+                    subheadline=(brief.target_audience or "").strip()[:80] or None,
+                    cta=alt_ctas[(i + 1) % len(alt_ctas)],
+                ),
+            ]
+            hashtags = [
+                (brief.company_name or "brand").replace(" ", "").lower(),
+                (brief.industry or "marketing").replace(" ", "").lower(),
+                "socialmedia",
+                "campaign",
+                moods[i % len(moods)],
+            ]
             concepts.append(
                 MockupConcept(
                     id=str(uuid.uuid4()),
                     platform=platform,
                     campaign=campaign.title if campaign else "Signature",
                     headline=headline,
-                    subheadline=(campaign.narrative[:80] if campaign else brief.goals[:80]),
-                    cta=campaign.primary_cta if campaign else "Learn more",
+                    subheadline=subheadline,
+                    cta=primary_cta,
                     body_copy=None,
                     visual_prompt=(
                         f"A {moods[i % len(moods)]} editorial image for {brief.company_name}. "
@@ -212,9 +260,41 @@ Campaign theme: {brief.campaign_theme or 'none'}
                     ),
                     palette=palette[:3],
                     mood=moods[i % len(moods)],
+                    variants=variants,
+                    caption=(
+                        f"{campaign.hook if campaign else brief.goals} "
+                        f"— {brief.company_name}."
+                    ),
+                    hashtags=hashtags,
+                    alt_text=(
+                        f"A {moods[i % len(moods)]} visual representing "
+                        f"{brief.company_name}'s {campaign.title if campaign else 'brand'} campaign."
+                    ),
                 )
             )
         return concepts
+
+    async def adapt_to_platform(
+        self,
+        project_id: str,
+        base_asset: MockupAsset,
+        platform: Platform,
+        style_guide: StyleGuide,
+    ) -> MockupAsset:
+        """Create a sibling mockup for a different platform (different aspect ratio).
+
+        The concept text is preserved; the image is re-rendered at the new
+        platform's native size so the Campaign Kit is truly multi-format.
+        """
+        project_dir = self.asset_dir / project_id / "mockups"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        sibling_concept = base_asset.concept.model_copy(update={
+            "id": str(uuid.uuid4()),
+            "platform": platform,
+        })
+        new_asset = await self._render_one(sibling_concept, style_guide, project_dir)
+        new_asset.kit_parent_id = base_asset.concept.id
+        return new_asset
 
     # ------------------------------------------------------------------
     # Image rendering

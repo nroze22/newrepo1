@@ -1,6 +1,7 @@
 """Orchestrator + in-memory project store for the Social Media Asset Studio."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -13,6 +14,7 @@ from .asset_builder import AssetBuilder
 from .brand_research import BrandResearcher
 from .models import (
     BrandBrief,
+    BrandLogo,
     BuiltAsset,
     MockupAsset,
     Platform,
@@ -153,6 +155,77 @@ class SocialStudioService:
             return asset
         raise KeyError(f"mockup {mockup_id} not found")
 
+    def set_logo(self, project_id: str, filename: str, data: bytes) -> BrandLogo:
+        """Persist a logo upload on the project."""
+        project = self._require(project_id)
+        project_dir = self.asset_dir / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+        # Normalize to a PNG named logo.png regardless of upload type.
+        from io import BytesIO
+        from PIL import Image
+        try:
+            img = Image.open(BytesIO(data)).convert("RGBA")
+        except Exception as exc:
+            raise ValueError(f"unreadable image: {exc}")
+        out_path = project_dir / "logo.png"
+        img.save(out_path, format="PNG", optimize=True)
+        logo = BrandLogo(
+            url=f"/api/social/projects/{project_id}/logo",
+            path=str(out_path),
+        )
+        project.logo = logo
+        self._touch(project)
+        return logo
+
+    def logo_path(self, project_id: str) -> Optional[Path]:
+        project = self._projects.get(project_id)
+        if not project or not project.logo:
+            return None
+        p = Path(project.logo.path)
+        return p if p.exists() else None
+
+    async def adapt_mockup_to_platforms(
+        self,
+        project_id: str,
+        mockup_id: str,
+        platforms: Optional[List[Platform]] = None,
+    ) -> List[MockupAsset]:
+        """Campaign Kit: spin a winning mockup out into multiple platforms.
+
+        Preserves the concept's copy; re-renders the image at each target
+        platform's native aspect ratio. Siblings are stored on the asset's
+        `.kit` list and also rendered into mockups dir so URLs work.
+        """
+        project = self._require(project_id)
+        targets = platforms or project.brief.platforms or []
+        base: Optional[MockupAsset] = None
+        for m in project.mockups:
+            if m.concept.id == mockup_id:
+                base = m
+                break
+        if base is None:
+            raise KeyError(f"mockup {mockup_id} not found")
+
+        # Skip the base's own platform since it already exists.
+        targets = [p for p in targets if p != base.concept.platform]
+        if not targets:
+            return base.kit
+
+        tasks = [
+            self.mockups.adapt_to_platform(project_id, base, p, project.style_guide)
+            for p in targets
+        ]
+        siblings = await asyncio.gather(*tasks, return_exceptions=True)
+        new_kit: List[MockupAsset] = []
+        for s in siblings:
+            if isinstance(s, Exception):
+                logger.warning("kit adapt failed: %s", s)
+                continue
+            new_kit.append(s)
+        base.kit = new_kit
+        self._touch(project)
+        return new_kit
+
     async def regenerate_mockup_image(
         self,
         project_id: str,
@@ -192,7 +265,8 @@ class SocialStudioService:
         else:
             ranked = sorted(project.mockups, key=lambda m: (-m.score, -m.votes))
             selected = [m for m in ranked if m.score > 0][:4] or ranked[:4]
-        built = self.builder.build_many(project_id, selected, project.style_guide)
+        logo_path = str(self.logo_path(project_id)) if self.logo_path(project_id) else None
+        built = self.builder.build_many(project_id, selected, project.style_guide, logo_path=logo_path)
         project.built_assets = built
         project.status = "built"
         self._touch(project)
@@ -206,10 +280,12 @@ class SocialStudioService:
         if not project:
             return None
         for m in project.mockups:
-            if m.concept.id == mockup_id and m.image_path:
-                p = Path(m.image_path)
-                if p.exists():
-                    return p
+            candidates = [m] + list(m.kit or [])
+            for c in candidates:
+                if c.concept.id == mockup_id and c.image_path:
+                    p = Path(c.image_path)
+                    if p.exists():
+                        return p
         return None
 
     def built_zip_path(self, project_id: str, slug: str) -> Optional[Path]:

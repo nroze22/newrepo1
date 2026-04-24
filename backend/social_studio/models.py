@@ -88,6 +88,13 @@ class CampaignIdea(BaseModel):
     suggested_platforms: List[str] = Field(default_factory=list)
 
 
+class CopyVariant(BaseModel):
+    """An alternate copy set for A/B testing the same image."""
+    headline: str
+    subheadline: Optional[str] = None
+    cta: str
+
+
 class StyleGuide(BaseModel):
     """Structured brand style guide produced from research + brief."""
     brand_essence: str
@@ -114,6 +121,11 @@ class MockupConcept(BaseModel):
     visual_prompt: str = Field(..., description="Prompt fed to the image model")
     palette: List[str] = Field(default_factory=list, description="Hex colors used")
     mood: str = ""
+    # v2 additions
+    variants: List[CopyVariant] = Field(default_factory=list, description="Alt copy sets for A/B testing")
+    caption: Optional[str] = Field(None, description="In-feed caption (platform-aware)")
+    hashtags: List[str] = Field(default_factory=list)
+    alt_text: Optional[str] = Field(None, description="Accessibility alt text")
 
 
 class MockupAsset(BaseModel):
@@ -126,6 +138,9 @@ class MockupAsset(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     votes: int = 0
     score: float = 0.0
+    # v2: multi-format siblings adapted from this asset
+    kit: List["MockupAsset"] = Field(default_factory=list)
+    kit_parent_id: Optional[str] = None
 
 
 class Vote(BaseModel):
@@ -148,6 +163,12 @@ class BuiltAsset(BaseModel):
     zip_url: Optional[str] = None
 
 
+class BrandLogo(BaseModel):
+    url: str
+    path: str
+    uploaded_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class StudioProject(BaseModel):
     """Top-level project object held in memory (or in a store)."""
     id: str
@@ -156,6 +177,7 @@ class StudioProject(BaseModel):
     style_guide: Optional[StyleGuide] = None
     mockups: List[MockupAsset] = Field(default_factory=list)
     built_assets: List[BuiltAsset] = Field(default_factory=list)
+    logo: Optional[BrandLogo] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     status: str = "draft"
@@ -191,4 +213,11 @@ class MockupUpdate(BaseModel):
 class RegenerateImageRequest(BaseModel):
     visual_prompt: Optional[str] = Field(
         None, description="If provided, replaces the concept's visual_prompt before rendering."
+    )
+
+
+class GenerateKitRequest(BaseModel):
+    platforms: Optional[List[Platform]] = Field(
+        None,
+        description="Platforms to spin out to. Defaults to the project's selected platforms."
     )
