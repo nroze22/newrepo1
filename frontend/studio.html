@@ -21,7 +21,8 @@
       <li data-step="style"><span>3</span>Style guide</li>
       <li data-step="collage"><span>4</span>Collage</li>
       <li data-step="vote"><span>5</span>Vote</li>
-      <li data-step="build"><span>6</span>Build &amp; ship</li>
+      <li data-step="refine"><span>6</span>Refine</li>
+      <li data-step="build"><span>7</span>Build &amp; ship</li>
     </ol>
     <div class="stepper__foot">
       <div class="muted">Powered by</div>
@@ -207,11 +208,25 @@
       <div class="voting" id="votingGrid"></div>
       <div class="step__foot">
         <span class="muted" id="voteStatus">0 votes cast</span>
-        <button class="btn btn--primary" id="goBuildBtn">Build winning assets →</button>
+        <button class="btn btn--primary" id="goRefineBtn">Refine your picks →</button>
       </div>
     </section>
 
-    <!-- STEP 6: BUILD -->
+    <!-- STEP 6: REFINE -->
+    <section class="step" data-step="refine" hidden>
+      <header class="step__head">
+        <h1>Refine your winners.</h1>
+        <p>Edit headlines, CTAs, and copy with live preview. Regenerate any image you don't love before we bake shippable assets.</p>
+      </header>
+      <div id="refineGrid" class="refine"></div>
+      <div class="step__foot">
+        <span class="muted" id="refineStatus"></span>
+        <button class="btn btn--ghost" id="backToVoteBtn">← Back to voting</button>
+        <button class="btn btn--primary" id="goBuildBtn">Build final assets →</button>
+      </div>
+    </section>
+
+    <!-- STEP 7: BUILD -->
     <section class="step" data-step="build" hidden>
       <header class="step__head">
         <h1>Your assets are ready.</h1>

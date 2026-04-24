@@ -132,6 +132,53 @@ class SocialStudioService:
         self._touch(project)
         return project.mockups
 
+    def update_mockup(
+        self,
+        project_id: str,
+        mockup_id: str,
+        updates: Dict[str, object],
+    ) -> MockupAsset:
+        """Patch editable concept fields on a mockup (headline, cta, etc.)."""
+        project = self._require(project_id)
+        for asset in project.mockups:
+            if asset.concept.id != mockup_id:
+                continue
+            concept = asset.concept
+            for field in ("headline", "subheadline", "cta", "body_copy", "visual_prompt"):
+                if updates.get(field) is not None:
+                    setattr(concept, field, updates[field])
+            if updates.get("palette") is not None:
+                concept.palette = list(updates["palette"])
+            self._touch(project)
+            return asset
+        raise KeyError(f"mockup {mockup_id} not found")
+
+    async def regenerate_mockup_image(
+        self,
+        project_id: str,
+        mockup_id: str,
+        visual_prompt: Optional[str] = None,
+    ) -> MockupAsset:
+        """Re-render a single mockup's image (optionally with a new visual prompt)."""
+        project = self._require(project_id)
+        for idx, asset in enumerate(project.mockups):
+            if asset.concept.id != mockup_id:
+                continue
+            if visual_prompt:
+                asset.concept.visual_prompt = visual_prompt
+            project_dir = self.asset_dir / project_id / "mockups"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            new_asset = await self.mockups._render_one(
+                asset.concept, project.style_guide, project_dir
+            )
+            # Preserve votes/score across regeneration.
+            new_asset.votes = asset.votes
+            new_asset.score = asset.score
+            project.mockups[idx] = new_asset
+            self._touch(project)
+            return new_asset
+        raise KeyError(f"mockup {mockup_id} not found")
+
     def build_assets(
         self,
         project_id: str,

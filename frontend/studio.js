@@ -6,6 +6,8 @@
     style:      (id)    => fetchJSON(`/api/social/projects/${id}/style-guide`, { method: "POST" }),
     mockups:    (id, body) => fetchJSON(`/api/social/projects/${id}/mockups`, { method: "POST", body }),
     vote:       (id, body) => fetchJSON(`/api/social/projects/${id}/vote`, { method: "POST", body }),
+    updateMockup: (id, mid, body) => fetchJSON(`/api/social/projects/${id}/mockups/${mid}`, { method: "PATCH", body }),
+    regenerate: (id, mid, body)   => fetchJSON(`/api/social/projects/${id}/mockups/${mid}/regenerate`, { method: "POST", body: body || {} }),
     build:      (id, body) => fetchJSON(`/api/social/projects/${id}/build`, { method: "POST", body }),
   };
 
@@ -15,12 +17,14 @@
     styleGuide: null,
     mockups: [],
     votes: new Map(), // mockup_id -> { value, heart, reject }
+    refinePicks: [],
+    originalConcepts: new Map(), // mockup_id -> snapshot of text fields
   };
 
   // ---------------------------------------------------------------------
   // Step orchestration
   // ---------------------------------------------------------------------
-  const STEPS = ["brief", "research", "style", "collage", "vote", "build"];
+  const STEPS = ["brief", "research", "style", "collage", "vote", "refine", "build"];
   const doneSteps = new Set();
   function go(step) {
     STEPS.forEach((s) => {
@@ -220,6 +224,16 @@
       const { mockups } = await api.mockups(state.projectId, { count });
       clearInterval(tick);
       state.mockups = mockups;
+      // Snapshot original text for the Reset button in the refine step
+      state.originalConcepts = new Map(
+        mockups.map((m) => [m.concept.id, {
+          headline: m.concept.headline,
+          subheadline: m.concept.subheadline || "",
+          cta: m.concept.cta,
+          body_copy: m.concept.body_copy || "",
+          visual_prompt: m.concept.visual_prompt,
+        }])
+      );
       renderCollage(mockups);
       document.getElementById("collageLoader").hidden = true;
       document.getElementById("collageView").hidden = false;
@@ -323,36 +337,196 @@
     document.getElementById("voteStatus").textContent = `${cast} voted · ${love} favorites`;
   }
 
-  document.getElementById("goBuildBtn").addEventListener("click", async () => {
+  document.getElementById("goRefineBtn").addEventListener("click", async () => {
     markDone("vote");
-    go("build");
-    await runBuildFlow();
-  });
 
-  // ---------------------------------------------------------------------
-  // Step 6: build
-  // ---------------------------------------------------------------------
-  async function runBuildFlow() {
-    document.getElementById("buildLoader").hidden = false;
-    document.getElementById("buildView").hidden = true;
-
-    // Flush votes to backend first
+    // Flush votes first so the backend score matches the UI ordering.
     const votes = [];
     state.votes.forEach((v, mockup_id) => {
       if (v.heart) votes.push({ mockup_id, value: Math.max(v.value, 4) });
       else if (v.reject) votes.push({ mockup_id, value: -1 });
       else if (v.value > 0) votes.push({ mockup_id, value: v.value });
     });
+    try { if (votes.length) await api.vote(state.projectId, { votes }); } catch (_) {}
+
+    // Rank: hearts first, then stars, then fall back to top 4 by positive votes.
+    const ranked = [...state.votes.entries()]
+      .map(([id, v]) => ({ id, score: (v.heart ? 10 : 0) + (v.value > 0 ? v.value : 0) }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score);
+    let picked = ranked.slice(0, 6).map((r) => r.id);
+    if (!picked.length) picked = state.mockups.slice(0, 4).map((m) => m.concept.id);
+
+    state.refinePicks = picked;
+    go("refine");
+    renderRefine();
+  });
+
+  document.getElementById("backToVoteBtn").addEventListener("click", () => go("vote"));
+
+  document.getElementById("goBuildBtn").addEventListener("click", async () => {
+    markDone("refine");
+    go("build");
+    await runBuildFlow();
+  });
+
+  // ---------------------------------------------------------------------
+  // Step 6: refine
+  // ---------------------------------------------------------------------
+  const saveTimers = new Map();
+
+  function mockupById(id) { return state.mockups.find((m) => m.concept.id === id); }
+
+  function renderRefine() {
+    const grid = document.getElementById("refineGrid");
+    grid.innerHTML = "";
+    const picks = state.refinePicks || [];
+    document.getElementById("refineStatus").textContent =
+      `${picks.length} concept${picks.length === 1 ? "" : "s"} selected from your votes`;
+
+    const sg = state.styleGuide || {};
+    const accent = (sg.colors || []).find((c) => (c.role || "").includes("accent"))?.hex
+      || (sg.colors || [])[1]?.hex || "#FF5A1F";
+    const display = (sg.fonts || []).find((f) => f.role === "display")?.google_font || "Space Grotesk";
+    loadGoogleFont(display);
+
+    picks.forEach((id) => {
+      const m = mockupById(id);
+      if (!m) return;
+      const vote = state.votes.get(id) || {};
+      const aspectClass = m.width > m.height * 1.2 ? "is-wide" : (m.height > m.width * 1.2 ? "is-tall" : "");
+
+      const card = document.createElement("div");
+      card.className = "refine-card";
+      card.dataset.id = id;
+      card.innerHTML = `
+        <div class="refine-card__preview ${aspectClass}">
+          <img class="refine-card__bg" src="${m.image_url}" alt="">
+          <div class="refine-card__scrim"></div>
+          <div class="refine-card__text">
+            <h3 data-bind="headline" style="font-family:'${display}',sans-serif">${escape(m.concept.headline)}</h3>
+            <p data-bind="subheadline">${escape(m.concept.subheadline || "")}</p>
+          </div>
+          <div class="refine-card__cta-pos">
+            <span class="refine-card__cta" data-bind="cta" style="background:${accent};color:${contrastText(accent)}">${escape(m.concept.cta)}</span>
+          </div>
+          <button class="refine-card__regen" data-act="regen" title="Regenerate this image">↻ New image</button>
+        </div>
+        <div class="refine-card__body">
+          <div class="refine-card__badges">
+            <span class="chip">${escape((m.concept.platform || "").replace(/_/g, " "))}</span>
+            <span class="chip">${escape(m.concept.campaign || "")}</span>
+            ${vote.heart ? '<span class="chip vote">♥ Loved</span>' : ''}
+            ${vote.value > 0 && !vote.heart ? `<span class="chip vote">${'★'.repeat(vote.value)}</span>` : ''}
+          </div>
+          <div class="refine-field">
+            <label>Headline</label>
+            <input data-field="headline" value="${escape(m.concept.headline)}" />
+          </div>
+          <div class="refine-field">
+            <label>Subheadline</label>
+            <input data-field="subheadline" value="${escape(m.concept.subheadline || '')}" />
+          </div>
+          <div class="refine-field">
+            <label>Call to action</label>
+            <input data-field="cta" value="${escape(m.concept.cta)}" />
+          </div>
+          <div class="refine-field">
+            <label>Caption / body copy</label>
+            <textarea data-field="body_copy">${escape(m.concept.body_copy || '')}</textarea>
+          </div>
+          <div class="refine-field">
+            <label>Image prompt (edit then regenerate)</label>
+            <textarea data-field="visual_prompt">${escape(m.concept.visual_prompt)}</textarea>
+          </div>
+          <div class="refine-card__actions">
+            <button data-act="reset">Reset text</button>
+            <button data-act="remove">Remove from build</button>
+          </div>
+          <span class="muted" data-role="status"></span>
+        </div>`;
+      wireRefineCard(card, m);
+      grid.appendChild(card);
+    });
+  }
+
+  function wireRefineCard(card, mockup) {
+    const id = mockup.concept.id;
+    const statusEl = card.querySelector('[data-role="status"]');
+    const previewText = (field) => card.querySelector(`[data-bind="${field}"]`);
+
+    card.querySelectorAll("[data-field]").forEach((el) => {
+      el.addEventListener("input", () => {
+        const field = el.dataset.field;
+        const value = el.value;
+        // Live preview
+        const bound = previewText(field);
+        if (bound) bound.textContent = value || "";
+        // Debounced save
+        if (saveTimers.has(id + ":" + field)) clearTimeout(saveTimers.get(id + ":" + field));
+        const t = setTimeout(async () => {
+          statusEl.textContent = "Saving…";
+          try {
+            const updated = await api.updateMockup(state.projectId, id, { [field]: value });
+            mockup.concept = updated.concept;
+            statusEl.textContent = "Saved ✓";
+            setTimeout(() => { statusEl.textContent = ""; }, 1200);
+          } catch (err) {
+            statusEl.textContent = "Save failed: " + err.message;
+          }
+        }, 500);
+        saveTimers.set(id + ":" + field, t);
+      });
+    });
+
+    card.querySelector('[data-act="regen"]').addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.classList.add("is-loading");
+      btn.textContent = "↻ Generating…";
+      const promptField = card.querySelector('[data-field="visual_prompt"]');
+      const newPrompt = promptField ? promptField.value : null;
+      try {
+        const updated = await api.regenerate(state.projectId, id, newPrompt ? { visual_prompt: newPrompt } : {});
+        // Replace local state + bust the image cache
+        const idx = state.mockups.findIndex((m) => m.concept.id === id);
+        if (idx >= 0) state.mockups[idx] = updated;
+        const bg = card.querySelector(".refine-card__bg");
+        const bust = `?v=${Date.now()}`;
+        bg.src = (updated.image_url || mockup.image_url) + bust;
+      } catch (err) {
+        alert("Regenerate failed: " + err.message);
+      } finally {
+        btn.classList.remove("is-loading");
+        btn.textContent = "↻ New image";
+      }
+    });
+
+    card.querySelector('[data-act="reset"]').addEventListener("click", async () => {
+      // No server-side "undo" — just restore the original concept we rendered initially if we still have it.
+      const original = state.originalConcepts && state.originalConcepts.get(id);
+      if (!original) return;
+      Object.assign(mockup.concept, original);
+      try { await api.updateMockup(state.projectId, id, original); } catch (_) {}
+      renderRefine();
+    });
+
+    card.querySelector('[data-act="remove"]').addEventListener("click", () => {
+      state.refinePicks = (state.refinePicks || []).filter((x) => x !== id);
+      renderRefine();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Step 7: build
+  // ---------------------------------------------------------------------
+  async function runBuildFlow() {
+    document.getElementById("buildLoader").hidden = false;
+    document.getElementById("buildView").hidden = true;
     try {
-      if (votes.length) await api.vote(state.projectId, { votes });
-      // Build: pick explicitly loved; else top-voted; else top 4 by score
-      const explicit = [...state.votes.entries()]
-        .filter(([, v]) => v.heart || (v.value && v.value > 0))
-        .sort((a, b) => (b[1].value + (b[1].heart ? 2 : 0)) - (a[1].value + (a[1].heart ? 2 : 0)))
-        .slice(0, 6)
-        .map(([id]) => id);
-      const body = explicit.length ? { mockup_ids: explicit } : {};
-      const result = await api.build(state.projectId, body);
+      const picks = state.refinePicks && state.refinePicks.length
+        ? { mockup_ids: state.refinePicks }
+        : {};
+      const result = await api.build(state.projectId, picks);
       renderBuilt(result);
       markDone("build");
       document.getElementById("buildLoader").hidden = true;

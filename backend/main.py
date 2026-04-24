@@ -21,6 +21,8 @@ from .social_studio.models import (
     GenerateMockupsRequest,
     VoteBatch,
     BuildAssetsRequest,
+    MockupUpdate,
+    RegenerateImageRequest,
 )
 
 # Load environment variables
@@ -425,6 +427,35 @@ async def social_vote(project_id: str, batch: VoteBatch):
         return {"mockups": [m.model_dump(mode="json") for m in mockups]}
     except KeyError:
         raise HTTPException(status_code=404, detail="project not found")
+
+
+@app.patch("/api/social/projects/{project_id}/mockups/{mockup_id}")
+async def social_update_mockup(project_id: str, mockup_id: str, updates: MockupUpdate):
+    """Patch editable fields on a mockup before building final assets."""
+    try:
+        asset = get_social_studio().update_mockup(
+            project_id, mockup_id, updates.model_dump(exclude_none=True)
+        )
+        return asset.model_dump(mode="json")
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/social/projects/{project_id}/mockups/{mockup_id}/regenerate")
+async def social_regenerate_mockup(
+    project_id: str, mockup_id: str, request: RegenerateImageRequest
+):
+    """Re-render a mockup's image (optionally with a new visual prompt)."""
+    try:
+        asset = await get_social_studio().regenerate_mockup_image(
+            project_id, mockup_id, visual_prompt=request.visual_prompt
+        )
+        return asset.model_dump(mode="json")
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("regenerate failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/social/projects/{project_id}/build")

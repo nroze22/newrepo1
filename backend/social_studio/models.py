@@ -176,3 +176,19 @@ class BuildAssetsRequest(BaseModel):
         None,
         description="If omitted, uses the top-voted mockups (up to 4)."
     )
+
+
+class MockupUpdate(BaseModel):
+    """Partial update to a MockupConcept after voting."""
+    headline: Optional[str] = None
+    subheadline: Optional[str] = None
+    cta: Optional[str] = None
+    body_copy: Optional[str] = None
+    visual_prompt: Optional[str] = None
+    palette: Optional[List[str]] = None
+
+
+class RegenerateImageRequest(BaseModel):
+    visual_prompt: Optional[str] = Field(
+        None, description="If provided, replaces the concept's visual_prompt before rendering."
+    )
