@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Social Studio — AI Campaign Creator</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/studio.css" />
+</head>
+<body>
+  <aside class="stepper" id="stepper">
+    <div class="stepper__brand">
+      <span class="stepper__logo">◎</span>
+      <span>Social Studio</span>
+    </div>
+    <ol class="stepper__list">
+      <li data-step="brief"><span>1</span>Brand brief</li>
+      <li data-step="research"><span>2</span>Research</li>
+      <li data-step="style"><span>3</span>Style guide</li>
+      <li data-step="collage"><span>4</span>Collage</li>
+      <li data-step="vote"><span>5</span>Vote</li>
+      <li data-step="refine"><span>6</span>Refine</li>
+      <li data-step="build"><span>7</span>Build &amp; ship</li>
+    </ol>
+    <div class="stepper__projects">
+      <div class="stepper__projects-head">
+        <span>Recent projects</span>
+        <button id="newProjectBtn" title="Start a new project">+ New</button>
+      </div>
+      <ul class="recent-list" id="recentList"></ul>
+    </div>
+    <div class="stepper__foot">
+      <div class="capabilities" id="capabilities" title="Integration status">
+        <span class="cap" data-cap="gemini">Gemini</span>
+        <span class="cap" data-cap="openai">OpenAI</span>
+      </div>
+      <button class="kbd-help-btn" id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+    </div>
+  </aside>
+
+  <main class="stage">
+
+    <!-- STEP 1: BRIEF -->
+    <section class="step" data-step="brief">
+      <header class="step__head">
+        <h1>Let's build a campaign.</h1>
+        <p>Tell us about the company. We'll research the web and draft a style guide in under a minute.</p>
+      </header>
+      <form id="briefForm" class="card form">
+        <label>
+          <span>Company name</span>
+          <input name="company_name" required placeholder="Acme Coffee" />
+        </label>
+        <label>
+          <span>Website</span>
+          <input name="website" type="url" placeholder="https://acme.coffee" />
+        </label>
+        <label>
+          <span>Industry</span>
+          <input name="industry" placeholder="Specialty coffee, DTC" />
+        </label>
+        <label class="span-2">
+          <span>Goals</span>
+          <textarea name="goals" required placeholder="Drive trial of our new cold brew in urban markets and grow IG following by 25% this quarter."></textarea>
+        </label>
+        <label class="span-2">
+          <span>Strategy / positioning</span>
+          <textarea name="strategy" placeholder="Premium but approachable. Roasted this week, shipped this week."></textarea>
+        </label>
+        <label>
+          <span>Audience</span>
+          <input name="target_audience" placeholder="Urban professionals 25-40" />
+        </label>
+        <label>
+          <span>Tone</span>
+          <input name="tone" placeholder="Confident, warm, a little witty" />
+        </label>
+        <label>
+          <span>Campaign theme (optional)</span>
+          <input name="campaign_theme" placeholder="Summer launch" />
+        </label>
+        <label>
+          <span>Social handles (optional)</span>
+          <input name="social_handles" placeholder="instagram:@acme, linkedin:/company/acme" />
+        </label>
+        <fieldset class="span-2">
+          <legend>Platforms</legend>
+          <div class="chips" id="platformChips">
+            <label class="chip chip--choice"><input type="checkbox" value="instagram_square" checked /> Instagram Square</label>
+            <label class="chip chip--choice"><input type="checkbox" value="instagram_story" checked /> Instagram Story</label>
+            <label class="chip chip--choice"><input type="checkbox" value="linkedin_feed" checked /> LinkedIn</label>
+            <label class="chip chip--choice"><input type="checkbox" value="twitter_post" /> X / Twitter</label>
+            <label class="chip chip--choice"><input type="checkbox" value="facebook_feed" /> Facebook</label>
+            <label class="chip chip--choice"><input type="checkbox" value="tiktok_story" /> TikTok</label>
+            <label class="chip chip--choice"><input type="checkbox" value="pinterest_pin" /> Pinterest</label>
+          </div>
+        </fieldset>
+        <fieldset class="span-2 logo-field">
+          <legend>Brand logo (optional)</legend>
+          <div class="logo-uploader" id="logoUploader">
+            <div class="logo-uploader__preview" id="logoPreview" aria-label="Logo preview"></div>
+            <div class="logo-uploader__actions">
+              <label class="btn btn--ghost" for="logoInput">Upload logo</label>
+              <input type="file" id="logoInput" accept="image/png,image/jpeg,image/webp" hidden />
+              <button type="button" class="btn btn--ghost" id="logoClear" hidden>Remove</button>
+              <span class="muted">PNG or JPG · appears in previews and ships in every asset.</span>
+            </div>
+          </div>
+        </fieldset>
+        <div class="form__foot span-2">
+          <button type="submit" class="btn btn--primary">Start research →</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- STEP 2: RESEARCH -->
+    <section class="step" data-step="research" hidden>
+      <header class="step__head">
+        <h1>Researching the brand.</h1>
+        <p>Gemini is reading the website and scanning the public web with Google Search grounding.</p>
+      </header>
+      <div id="researchLoader" class="loader">
+        <div class="loader__bars"><span></span><span></span><span></span><span></span></div>
+        <p id="researchStatus">Searching the web…</p>
+      </div>
+      <article id="researchReport" class="card research" hidden>
+        <h2 id="rSummary"></h2>
+        <div class="grid-2">
+          <div><h3>Positioning</h3><p id="rPositioning"></p></div>
+          <div><h3>Audience insights</h3><p id="rAudience"></p></div>
+          <div><h3>Current channel observations</h3><p id="rChannels"></p></div>
+          <div><h3>Opportunities</h3><ul id="rOpportunities"></ul></div>
+          <div><h3>Themes observed</h3><ul id="rThemes" class="inline-list"></ul></div>
+          <div><h3>Competitors</h3><ul id="rCompetitors" class="inline-list"></ul></div>
+        </div>
+        <footer class="research__sources">
+          <h3>Sources</h3>
+          <ul id="rSources"></ul>
+        </footer>
+        <div class="step__foot">
+          <button class="btn btn--primary" id="goStyleBtn">Draft style guide →</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- STEP 3: STYLE GUIDE -->
+    <section class="step" data-step="style" hidden>
+      <header class="step__head">
+        <h1>Your draft style guide.</h1>
+        <p>Fine-tune anything. These colors, fonts, and ideas will drive the collage.</p>
+      </header>
+      <div id="styleLoader" class="loader">
+        <div class="loader__bars"><span></span><span></span><span></span><span></span></div>
+        <p>Composing your style guide…</p>
+      </div>
+      <article id="styleView" class="card" hidden>
+        <section class="style-block">
+          <h2 id="sEssence"></h2>
+          <p class="muted" id="sVoice"></p>
+          <ul id="sTone" class="chips"></ul>
+        </section>
+        <section class="style-block">
+          <h3>Color system</h3>
+          <div class="palette" id="sColors"></div>
+        </section>
+        <section class="style-block">
+          <h3>Typography</h3>
+          <div class="fonts" id="sFonts"></div>
+        </section>
+        <section class="style-block">
+          <h3>Imagery direction</h3>
+          <p id="sImagery"></p>
+        </section>
+        <section class="style-block grid-2">
+          <div>
+            <h3>Key messages</h3>
+            <ul id="sMessages"></ul>
+          </div>
+          <div>
+            <h3>Do / don't say</h3>
+            <ul id="sDo" class="good"></ul>
+            <ul id="sDont" class="bad"></ul>
+          </div>
+        </section>
+        <section class="style-block">
+          <h3>Campaign concepts</h3>
+          <div class="campaigns" id="sCampaigns"></div>
+        </section>
+        <div class="step__foot">
+          <label class="inline">
+            <span>Generate</span>
+            <select id="mockupCount">
+              <option>4</option><option>8</option><option>12</option><option selected>16</option>
+            </select>
+            <span>mockups</span>
+          </label>
+          <button class="btn btn--primary" id="goMockupsBtn">Generate collage →</button>
+        </div>
+      </article>
+    </section>
+
+    <!-- STEP 4: COLLAGE -->
+    <section class="step" data-step="collage" hidden>
+      <header class="step__head">
+        <h1>Generating your collage.</h1>
+        <p id="collageHeadline">Tiles appear live as each one finishes — concurrent with retries on failure.</p>
+      </header>
+      <div class="progress-bar" id="collageProgress" hidden>
+        <div class="progress-bar__fill" id="collageProgressFill"></div>
+        <span class="progress-bar__label" id="collageProgressLabel">0 / 0</span>
+      </div>
+      <div class="collage" id="collageGrid"></div>
+      <div class="step__foot" id="collageFoot" hidden>
+        <button class="btn btn--ghost" id="regenerateBtn">↻ Regenerate all</button>
+        <button class="btn btn--primary" id="goVoteBtn">Start voting →</button>
+      </div>
+    </section>
+
+    <!-- STEP 5: VOTE -->
+    <section class="step" data-step="vote" hidden>
+      <header class="step__head">
+        <h1>Which concepts win?</h1>
+        <p>Tap ♥ to love, ✕ to reject, or 1-5 ⭐ to rank. Or use the keyboard: <kbd>J</kbd>/<kbd>K</kbd> navigate · <kbd>L</kbd> love · <kbd>X</kbd> pass · <kbd>1</kbd>-<kbd>5</kbd> stars.</p>
+      </header>
+      <div class="voting" id="votingGrid"></div>
+      <div class="step__foot">
+        <span class="muted" id="voteStatus">0 votes cast</span>
+        <button class="btn btn--primary" id="goRefineBtn">Refine your picks →</button>
+      </div>
+    </section>
+
+    <!-- STEP 6: REFINE -->
+    <section class="step" data-step="refine" hidden>
+      <header class="step__head">
+        <h1>Refine your winners.</h1>
+        <p>Edit headlines, CTAs, and copy with live preview. Regenerate any image you don't love before we bake shippable assets.</p>
+      </header>
+      <div id="refineGrid" class="refine"></div>
+      <div class="step__foot">
+        <span class="muted" id="refineStatus"></span>
+        <button class="btn btn--ghost" id="backToVoteBtn">← Back to voting</button>
+        <button class="btn btn--primary" id="goBuildBtn">Build final assets →</button>
+      </div>
+    </section>
+
+    <!-- STEP 7: BUILD -->
+    <section class="step" data-step="build" hidden>
+      <header class="step__head">
+        <h1>Your assets are ready.</h1>
+        <p>Each winner has live editable HTML + CSS, a flat PNG, and a ZIP ready for download. Postage integration coming for direct-to-social publishing.</p>
+      </header>
+      <div id="buildLoader" class="loader">
+        <div class="loader__bars"><span></span><span></span><span></span><span></span></div>
+        <p>Baking HTML, CSS, and PNG bundles…</p>
+      </div>
+      <div id="buildView" hidden>
+        <div class="built" id="builtGrid"></div>
+        <div class="step__foot">
+          <a class="btn btn--primary" id="downloadAll" href="#" download>⬇ Download all (ZIP)</a>
+          <button class="btn btn--ghost" id="startOverBtn">Start a new project</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toasts -->
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- Keyboard help -->
+  <div id="kbdHelp" class="modal" hidden>
+    <div class="modal__scrim" data-close></div>
+    <div class="modal__body kbd-help">
+      <button class="modal__close" data-close>✕</button>
+      <h2>Keyboard shortcuts</h2>
+      <table>
+        <tr><th>Vote</th><td><kbd>L</kbd> love · <kbd>X</kbd> pass · <kbd>1</kbd>–<kbd>5</kbd> stars</td></tr>
+        <tr><th>Navigate</th><td><kbd>J</kbd>/<kbd>→</kbd> next · <kbd>K</kbd>/<kbd>←</kbd> prev</td></tr>
+        <tr><th>General</th><td><kbd>?</kbd> show this · <kbd>Esc</kbd> close modals</td></tr>
+        <tr><th>Refine</th><td>Click <em>Variant</em> chip to swap copy · <em>↻ New image</em> regenerates</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Preview modal -->
+  <div id="previewModal" class="modal" hidden>
+    <div class="modal__scrim" data-close></div>
+    <div class="modal__body">
+      <button class="modal__close" data-close>✕</button>
+      <div id="previewBody"></div>
+    </div>
+  </div>
+
+  <script src="/static/studio.js"></script>
+</body>
+</html>
