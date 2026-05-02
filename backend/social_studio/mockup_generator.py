@@ -95,6 +95,9 @@ class MockupGenerator:
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
         self._openai = None
+        # Cap concurrent OpenAI image calls so we don't trip rate limits even
+        # when the user asks for a 16-tile collage.
+        self._openai_sem = asyncio.Semaphore(int(os.getenv("OPENAI_IMAGE_CONCURRENCY", "4")))
         if openai_api_key and openai_api_key != "demo":
             try:
                 from openai import AsyncOpenAI
@@ -305,27 +308,48 @@ Campaign theme: {brief.campaign_theme or 'none'}
         concepts: List[MockupConcept],
         style_guide: StyleGuide,
     ) -> List[MockupAsset]:
+        assets: List[MockupAsset] = []
+        async for event in self.render_mockups_streaming(project_id, concepts, style_guide):
+            if event.get("type") == "tile":
+                assets.append(event["asset"])
+        return assets
+
+    async def render_mockups_streaming(
+        self,
+        project_id: str,
+        concepts: List[MockupConcept],
+        style_guide: StyleGuide,
+    ):
+        """Yield events as each tile finishes - powers SSE progress streaming."""
         project_dir = self.asset_dir / project_id / "mockups"
         project_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate all images concurrently
-        tasks = [
-            self._render_one(concept, style_guide, project_dir) for concept in concepts
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        assets: List[MockupAsset] = []
-        for concept, result in zip(concepts, results):
-            if isinstance(result, Exception):
-                logger.error("Mockup render failed for %s: %s", concept.id, result)
-                # Always fall back to a local placeholder so the collage is complete.
-                try:
-                    asset = self._render_placeholder(concept, style_guide, project_dir)
-                    assets.append(asset)
-                except Exception as exc:
-                    logger.error("Placeholder render also failed: %s", exc)
-            else:
-                assets.append(result)
-        return assets
+        async def _wrap(concept: MockupConcept) -> MockupAsset:
+            try:
+                return await self._render_one(concept, style_guide, project_dir)
+            except Exception as exc:
+                logger.error("Mockup render failed for %s: %s", concept.id, exc)
+                return self._render_placeholder(concept, style_guide, project_dir)
+
+        tasks = {asyncio.create_task(_wrap(c)): c for c in concepts}
+        total = len(tasks)
+        completed = 0
+        yield {"type": "plan", "total": total}
+        try:
+            for fut in asyncio.as_completed(list(tasks.keys())):
+                asset = await fut
+                completed += 1
+                yield {
+                    "type": "tile",
+                    "completed": completed,
+                    "total": total,
+                    "asset": asset,
+                }
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+        yield {"type": "done", "total": total}
 
     async def _render_one(
         self,
@@ -346,14 +370,33 @@ Campaign theme: {brief.campaign_theme or 'none'}
         size = self._nearest_supported_size(spec["w"], spec["h"])
         prompt = self._compose_image_prompt(concept)
 
-        response = await self._openai.images.generate(
-            model=self.image_model,
-            prompt=prompt,
-            size=size,
-            n=1,
-        )
-        b64 = response.data[0].b64_json
-        png_bytes = base64.b64decode(b64)
+        # Bounded concurrency + exponential-backoff retry on transient errors.
+        png_bytes: Optional[bytes] = None
+        async with self._openai_sem:
+            attempts = 3
+            delay = 1.5
+            for attempt in range(1, attempts + 1):
+                try:
+                    response = await self._openai.images.generate(
+                        model=self.image_model,
+                        prompt=prompt,
+                        size=size,
+                        n=1,
+                    )
+                    b64 = response.data[0].b64_json
+                    png_bytes = base64.b64decode(b64)
+                    break
+                except Exception as exc:
+                    transient = self._is_transient_error(exc)
+                    logger.warning(
+                        "OpenAI image gen attempt %d/%d failed (%s, transient=%s)",
+                        attempt, attempts, exc, transient,
+                    )
+                    if attempt >= attempts or not transient:
+                        raise
+                    await asyncio.sleep(delay)
+                    delay *= 2
+        assert png_bytes is not None
 
         # Resize to exact platform spec
         img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
@@ -376,6 +419,21 @@ Campaign theme: {brief.campaign_theme or 'none'}
         if ratio < 0.8:
             return "1024x1536"
         return "1024x1024"
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        """Classify common OpenAI errors as retryable or not."""
+        name = type(exc).__name__.lower()
+        msg = str(exc).lower()
+        if any(k in name for k in ("rate", "timeout", "connection", "apiconnection", "internalserver")):
+            return True
+        if any(k in msg for k in (
+            "rate limit", "timeout", "temporarily",
+            "connection", "reset", "unavailable",
+            "504", "503", "502", "500",
+        )):
+            return True
+        return False
 
     def _compose_image_prompt(self, concept: MockupConcept) -> str:
         palette_note = ""

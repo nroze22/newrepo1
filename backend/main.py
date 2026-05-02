@@ -1,7 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 import os
 from dotenv import load_dotenv
 import json
@@ -353,6 +353,24 @@ async def studio_page():
         )
 
 
+@app.get("/api/social/health")
+async def social_health():
+    """Capabilities + readiness for the Social Studio integrations."""
+    return get_social_studio().capabilities()
+
+
+@app.get("/api/social/projects")
+async def social_list_projects(limit: int = 20):
+    """Recently updated projects (for the resume drawer)."""
+    return {"projects": get_social_studio().list_projects(limit=limit)}
+
+
+@app.delete("/api/social/projects/{project_id}")
+async def social_delete_project(project_id: str):
+    get_social_studio().delete_project(project_id)
+    return {"deleted": project_id}
+
+
 @app.post("/api/social/projects")
 async def social_create_project(brief: BrandBrief):
     """Create a new studio project from a brand brief."""
@@ -401,6 +419,45 @@ async def social_generate_mockups(project_id: str, request: GenerateMockupsReque
     except Exception as e:
         logger.exception("mockup generation failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/projects/{project_id}/mockups/stream")
+async def social_generate_mockups_stream(
+    project_id: str,
+    count: int = 16,
+    platforms: str = "",
+):
+    """Stream mockup generation as Server-Sent Events.
+
+    Emits events: status, plan, tile, done. Each tile event carries the
+    finished MockupAsset so the client can append it to the collage live.
+    """
+    plats = [p for p in platforms.split(",") if p] or None
+
+    async def event_stream():
+        try:
+            async for event in get_social_studio().generate_mockups_streaming(
+                project_id, count=count, platforms=plats
+            ):
+                payload = dict(event)
+                if "asset" in payload:
+                    payload["asset"] = payload["asset"].model_dump(mode="json")
+                yield f"data: {json.dumps(payload)}\n\n"
+        except KeyError:
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'project not found'})}\n\n"
+        except Exception as exc:
+            logger.exception("streaming mockup gen failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/social/projects/{project_id}")

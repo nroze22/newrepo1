@@ -24,10 +24,19 @@
       <li data-step="refine"><span>6</span>Refine</li>
       <li data-step="build"><span>7</span>Build &amp; ship</li>
     </ol>
+    <div class="stepper__projects">
+      <div class="stepper__projects-head">
+        <span>Recent projects</span>
+        <button id="newProjectBtn" title="Start a new project">+ New</button>
+      </div>
+      <ul class="recent-list" id="recentList"></ul>
+    </div>
     <div class="stepper__foot">
-      <div class="muted">Powered by</div>
-      <div class="chip">Gemini · Google Search</div>
-      <div class="chip">OpenAI gpt-image-1</div>
+      <div class="capabilities" id="capabilities" title="Integration status">
+        <span class="cap" data-cap="gemini">Gemini</span>
+        <span class="cap" data-cap="openai">OpenAI</span>
+      </div>
+      <button class="kbd-help-btn" id="helpBtn" title="Keyboard shortcuts (?)">?</button>
     </div>
   </aside>
 
@@ -196,18 +205,16 @@
     <section class="step" data-step="collage" hidden>
       <header class="step__head">
         <h1>Generating your collage.</h1>
-        <p>Creating up to 16 mockups in parallel with OpenAI's gpt-image-1. Sit tight.</p>
+        <p id="collageHeadline">Tiles appear live as each one finishes — concurrent with retries on failure.</p>
       </header>
-      <div id="collageLoader" class="loader">
-        <div class="loader__bars"><span></span><span></span><span></span><span></span></div>
-        <p id="collageStatus">Planning distinct concepts…</p>
+      <div class="progress-bar" id="collageProgress" hidden>
+        <div class="progress-bar__fill" id="collageProgressFill"></div>
+        <span class="progress-bar__label" id="collageProgressLabel">0 / 0</span>
       </div>
-      <div id="collageView" hidden>
-        <div class="collage" id="collageGrid"></div>
-        <div class="step__foot">
-          <button class="btn btn--ghost" id="regenerateBtn">↻ Regenerate</button>
-          <button class="btn btn--primary" id="goVoteBtn">Start voting →</button>
-        </div>
+      <div class="collage" id="collageGrid"></div>
+      <div class="step__foot" id="collageFoot" hidden>
+        <button class="btn btn--ghost" id="regenerateBtn">↻ Regenerate all</button>
+        <button class="btn btn--primary" id="goVoteBtn">Start voting →</button>
       </div>
     </section>
 
@@ -258,6 +265,24 @@
     </section>
 
   </main>
+
+  <!-- Toasts -->
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- Keyboard help -->
+  <div id="kbdHelp" class="modal" hidden>
+    <div class="modal__scrim" data-close></div>
+    <div class="modal__body kbd-help">
+      <button class="modal__close" data-close>✕</button>
+      <h2>Keyboard shortcuts</h2>
+      <table>
+        <tr><th>Vote</th><td><kbd>L</kbd> love · <kbd>X</kbd> pass · <kbd>1</kbd>–<kbd>5</kbd> stars</td></tr>
+        <tr><th>Navigate</th><td><kbd>J</kbd>/<kbd>→</kbd> next · <kbd>K</kbd>/<kbd>←</kbd> prev</td></tr>
+        <tr><th>General</th><td><kbd>?</kbd> show this · <kbd>Esc</kbd> close modals</td></tr>
+        <tr><th>Refine</th><td>Click <em>Variant</em> chip to swap copy · <em>↻ New image</em> regenerates</td></tr>
+      </table>
+    </div>
+  </div>
 
   <!-- Preview modal -->
   <div id="previewModal" class="modal" hidden>

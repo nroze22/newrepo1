@@ -17,7 +17,34 @@
       return res.json();
     },
     build:      (id, body) => fetchJSON(`/api/social/projects/${id}/build`, { method: "POST", body }),
+    health:     ()        => fetchJSON("/api/social/health"),
+    listProjects: ()      => fetchJSON("/api/social/projects"),
+    deleteProject: (id)   => fetchJSON(`/api/social/projects/${id}`, { method: "DELETE" }),
+    getProject:   (id)    => fetchJSON(`/api/social/projects/${id}`),
   };
+
+  // ---------------------------------------------------------------------
+  // Toast notifications (replaces alert)
+  // ---------------------------------------------------------------------
+  const toastsEl = document.getElementById("toasts");
+  function toast(message, kind = "info", timeout = 4000) {
+    const el = document.createElement("div");
+    el.className = `toast toast--${kind}`;
+    el.innerHTML = `<span>${escape(message)}</span><button aria-label="Dismiss">✕</button>`;
+    const dismiss = () => {
+      el.classList.add("is-leaving");
+      setTimeout(() => el.remove(), 200);
+    };
+    el.querySelector("button").addEventListener("click", dismiss);
+    toastsEl.appendChild(el);
+    if (timeout) setTimeout(dismiss, timeout);
+    return dismiss;
+  }
+  // Surface unhandled promise errors as toasts (safety net)
+  window.addEventListener("unhandledrejection", (e) => {
+    const msg = (e.reason && e.reason.message) || String(e.reason);
+    if (msg) toast(msg, "err");
+  });
 
   const state = {
     projectId: null,
@@ -113,7 +140,7 @@
       go("research");
       await runResearchFlow();
     } catch (err) {
-      alert("Failed to start: " + err.message);
+      toast("Couldn’t start: " + err.message, "err");
     } finally {
       setButtonBusy(e.target.querySelector("button[type=submit]"), false, "Start research →");
     }
@@ -143,7 +170,7 @@
       document.getElementById("researchReport").hidden = false;
     } catch (err) {
       clearInterval(tick);
-      alert("Research failed: " + err.message);
+      toast("Research failed: " + err.message, "err");
     }
   }
 
@@ -189,7 +216,7 @@
       document.getElementById("styleLoader").hidden = true;
       document.getElementById("styleView").hidden = false;
     } catch (err) {
-      alert("Style guide failed: " + err.message);
+      toast("Style guide failed: " + err.message, "err");
     }
   }
 
@@ -250,58 +277,141 @@
   // ---------------------------------------------------------------------
   // Step 4: collage
   // ---------------------------------------------------------------------
+  let collageSse = null;
   async function runCollageFlow(count) {
-    document.getElementById("collageLoader").hidden = false;
-    document.getElementById("collageView").hidden = true;
-    const status = document.getElementById("collageStatus");
-    const msgs = [
-      "Planning distinct concepts…",
-      "Calling OpenAI gpt-image-1…",
-      "Rendering mockups in parallel…",
-      "Finalizing the collage…",
-    ];
-    let i = 0;
-    const tick = setInterval(() => { status.textContent = msgs[(++i) % msgs.length]; }, 2000);
-    try {
-      const { mockups } = await api.mockups(state.projectId, { count });
-      clearInterval(tick);
-      state.mockups = mockups;
-      // Snapshot original text for the Reset button in the refine step
-      state.originalConcepts = new Map(
-        mockups.map((m) => [m.concept.id, {
-          headline: m.concept.headline,
-          subheadline: m.concept.subheadline || "",
-          cta: m.concept.cta,
-          body_copy: m.concept.body_copy || "",
-          visual_prompt: m.concept.visual_prompt,
-        }])
-      );
-      renderCollage(mockups);
-      document.getElementById("collageLoader").hidden = true;
-      document.getElementById("collageView").hidden = false;
-    } catch (err) {
-      clearInterval(tick);
-      alert("Mockup generation failed: " + err.message);
-    }
+    if (collageSse) collageSse.close();
+    state.mockups = [];
+    const grid = document.getElementById("collageGrid");
+    grid.innerHTML = "";
+    const progressEl = document.getElementById("collageProgress");
+    const fillEl = document.getElementById("collageProgressFill");
+    const labelEl = document.getElementById("collageProgressLabel");
+    const headlineEl = document.getElementById("collageHeadline");
+    const footEl = document.getElementById("collageFoot");
+    progressEl.hidden = false;
+    footEl.hidden = true;
+    fillEl.style.width = "0%";
+    labelEl.textContent = "Planning…";
+    headlineEl.textContent = "Tiles appear live as each one finishes — concurrent with retries on failure.";
+
+    const platforms = [...document.querySelectorAll("#platformChips input:checked")].map((i) => i.value);
+    const url = `/api/social/projects/${state.projectId}/mockups/stream`
+      + `?count=${count}&platforms=${platforms.join(",")}`;
+
+    return new Promise((resolve) => {
+      const sse = new EventSource(url);
+      collageSse = sse;
+      let total = count;
+      let completed = 0;
+      // Render placeholder tiles up front so users see structure immediately.
+      const renderPlaceholders = (n) => {
+        grid.innerHTML = "";
+        for (let i = 0; i < n; i++) {
+          const t = document.createElement("div");
+          t.className = "tile is-pending";
+          t.dataset.idx = i;
+          grid.appendChild(t);
+        }
+      };
+
+      sse.onmessage = (ev) => {
+        let data;
+        try { data = JSON.parse(ev.data); } catch (_) { return; }
+        if (data.type === "status") {
+          headlineEl.textContent = data.status === "planning"
+            ? "Planning distinct concepts…"
+            : headlineEl.textContent;
+        } else if (data.type === "plan") {
+          total = data.total;
+          renderPlaceholders(total);
+          labelEl.textContent = `0 / ${total}`;
+        } else if (data.type === "tile") {
+          const m = data.asset;
+          state.mockups.push(m);
+          state.originalConcepts.set(m.concept.id, {
+            headline: m.concept.headline,
+            subheadline: m.concept.subheadline || "",
+            cta: m.concept.cta,
+            body_copy: m.concept.body_copy || "",
+            visual_prompt: m.concept.visual_prompt,
+          });
+          // Replace the next pending placeholder with the real tile.
+          const slot = grid.querySelector(".tile.is-pending");
+          if (slot) {
+            slot.replaceWith(buildTile(m));
+          } else {
+            grid.appendChild(buildTile(m));
+          }
+          completed = data.completed;
+          fillEl.style.width = `${(completed / total) * 100}%`;
+          labelEl.textContent = `${completed} / ${total}`;
+        } else if (data.type === "done") {
+          fillEl.style.width = "100%";
+          labelEl.textContent = `${total} / ${total} ✓`;
+          headlineEl.textContent = "Done — pick the ones you love.";
+          footEl.hidden = false;
+          toast(`Generated ${total} mockups`, "ok", 2500);
+          sse.close();
+          collageSse = null;
+          resolve();
+        } else if (data.type === "error") {
+          toast("Mockup generation failed: " + data.detail, "err");
+          sse.close();
+          collageSse = null;
+          resolve();
+        }
+      };
+      sse.onerror = () => {
+        if (sse.readyState === EventSource.CLOSED) return;
+        toast("Lost streaming connection. Reload to retry.", "err");
+        sse.close();
+        collageSse = null;
+        resolve();
+      };
+    });
+  }
+
+  function buildTile(m) {
+    const tile = document.createElement("div");
+    tile.className = "tile";
+    tile.dataset.id = m.concept.id;
+    const platform = (m.concept.platform || "").replace(/_/g, " ");
+    tile.innerHTML = `
+      <img loading="lazy" src="${m.image_url}" alt="${escape(m.concept.headline)}" />
+      <span class="tile__platform">${escape(platform)}</span>
+      <button class="tile__retry" data-act="retry" title="Regenerate this tile">↻</button>
+      <div class="tile__overlay">
+        <h3 class="tile__headline">${escape(m.concept.headline)}</h3>
+        <span class="tile__cta">${escape(m.concept.cta)}</span>
+      </div>`;
+    tile.addEventListener("click", (e) => {
+      if (e.target.closest("[data-act='retry']")) return;
+      openPreview(m);
+    });
+    tile.querySelector('[data-act="retry"]').addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      btn.textContent = "…";
+      try {
+        const updated = await api.regenerate(state.projectId, m.concept.id, {});
+        const idx = state.mockups.findIndex((x) => x.concept.id === m.concept.id);
+        if (idx >= 0) state.mockups[idx] = updated;
+        const fresh = buildTile(updated);
+        tile.replaceWith(fresh);
+        toast("Tile regenerated", "ok", 2000);
+      } catch (err) {
+        toast("Retry failed: " + err.message, "err");
+        btn.textContent = "↻";
+      }
+    });
+    return tile;
   }
 
   function renderCollage(mockups) {
     const grid = document.getElementById("collageGrid");
     grid.innerHTML = "";
-    mockups.forEach((m) => {
-      const tile = document.createElement("div");
-      tile.className = "tile";
-      const platform = (m.concept.platform || "").replace(/_/g, " ");
-      tile.innerHTML = `
-        <img loading="lazy" src="${m.image_url}" alt="${escape(m.concept.headline)}" />
-        <span class="tile__platform">${escape(platform)}</span>
-        <div class="tile__overlay">
-          <h3 class="tile__headline">${escape(m.concept.headline)}</h3>
-          <span class="tile__cta">${escape(m.concept.cta)}</span>
-        </div>`;
-      tile.addEventListener("click", () => openPreview(m));
-      grid.appendChild(tile);
-    });
+    mockups.forEach((m) => grid.appendChild(buildTile(m)));
+    document.getElementById("collageFoot").hidden = false;
   }
 
   document.getElementById("regenerateBtn").addEventListener("click", async () => {
@@ -546,7 +656,14 @@
             </div>
           </div>` : ''}
           <div class="caption-block">
-            <label>Caption</label>
+            <label style="display:flex;align-items:center;justify-content:space-between">
+              Caption
+              <span style="display:inline-flex;gap:6px">
+                <button type="button" class="copy-btn" data-copy="caption">📋 Copy</button>
+                ${hashtags ? `<button type="button" class="copy-btn" data-copy="hashtags">#</button>` : ''}
+                ${m.concept.alt_text ? `<button type="button" class="copy-btn" data-copy="alt">alt</button>` : ''}
+              </span>
+            </label>
             <textarea data-field="caption">${escape(m.concept.caption || m.concept.body_copy || '')}</textarea>
             ${hashtags ? `<div class="hashtags">${escape(hashtags)}</div>` : ''}
             ${m.concept.alt_text ? `<div class="alt"><strong>Alt:</strong> ${escape(m.concept.alt_text)}</div>` : ''}
@@ -655,7 +772,7 @@
         const row = card.querySelector('[data-role="kit-row"]');
         row.innerHTML = kit.map((k) => kitTileHtml(k)).join("");
       } catch (err) {
-        alert("Kit adaptation failed: " + err.message);
+        toast("Kit adaptation failed: " + err.message, "err");
       } finally {
         kitBtn.disabled = false;
         kitBtn.textContent = originalLabel;
@@ -677,7 +794,7 @@
         const bust = `?v=${Date.now()}`;
         bg.src = (updated.image_url || mockup.image_url) + bust;
       } catch (err) {
-        alert("Regenerate failed: " + err.message);
+        toast("Regenerate failed: " + err.message, "err");
       } finally {
         btn.classList.remove("is-loading");
         btn.textContent = "↻ New image";
@@ -715,7 +832,7 @@
       document.getElementById("buildLoader").hidden = true;
       document.getElementById("buildView").hidden = false;
     } catch (err) {
-      alert("Build failed: " + err.message);
+      toast("Build failed: " + err.message, "err");
     }
   }
 
@@ -854,6 +971,193 @@
     if (label) btn.textContent = label;
   }
 
+  // ---------------------------------------------------------------------
+  // Capabilities probe
+  // ---------------------------------------------------------------------
+  async function refreshCapabilities() {
+    try {
+      const c = await api.health();
+      const set = (sel, on, label) => {
+        const el = document.querySelector(`#capabilities .cap[data-cap="${sel}"]`);
+        if (!el) return;
+        el.classList.toggle("is-on", on);
+        el.classList.toggle("is-off", !on);
+        el.title = `${label}: ${on ? "ready" : "not configured"}`;
+      };
+      set("gemini", !!c.gemini_text, "Gemini");
+      set("openai", !!c.openai_image, "OpenAI gpt-image-1");
+      if (!c.openai_image && !window.__warnedOpenAI) {
+        window.__warnedOpenAI = true;
+        toast("OpenAI not configured — using local placeholder images. Add OPENAI_API_KEY for real renders.", "info", 7000);
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  // ---------------------------------------------------------------------
+  // Recent projects
+  // ---------------------------------------------------------------------
+  async function refreshRecent() {
+    let list = [];
+    try { ({ projects: list } = await api.listProjects()); } catch (_) { return; }
+    const ul = document.getElementById("recentList");
+    ul.innerHTML = "";
+    list.forEach((p) => {
+      const li = document.createElement("li");
+      li.dataset.id = p.id;
+      const when = relativeTime(new Date(p.updated_at));
+      li.innerHTML = `
+        <div style="overflow:hidden">
+          <div style="font-weight:600; white-space:nowrap; text-overflow:ellipsis; overflow:hidden">${escape(p.company || 'Untitled')}</div>
+          <div class="recent-meta">${escape(p.status)} · ${when}</div>
+        </div>
+        <button class="recent-del" title="Delete">✕</button>`;
+      li.addEventListener("click", (e) => {
+        if (e.target.closest(".recent-del")) return;
+        resumeProject(p.id);
+      });
+      li.querySelector(".recent-del").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete project "${p.company}"? This removes its assets too.`)) return;
+        try {
+          await api.deleteProject(p.id);
+          toast("Project deleted", "ok", 2000);
+          refreshRecent();
+        } catch (err) { toast(err.message, "err"); }
+      });
+      ul.appendChild(li);
+    });
+  }
+
+  document.getElementById("newProjectBtn").addEventListener("click", () => {
+    if (state.projectId && !confirm("Start a new project? Your current project stays saved on the server.")) return;
+    location.reload();
+  });
+
+  function relativeTime(d) {
+    const s = (Date.now() - d.getTime()) / 1000;
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
+
+  // ---------------------------------------------------------------------
+  // Resume a project from disk
+  // ---------------------------------------------------------------------
+  async function resumeProject(id) {
+    try {
+      const p = await api.getProject(id);
+      state.projectId = p.id;
+      state.research = p.research || null;
+      state.styleGuide = p.style_guide || null;
+      state.mockups = p.mockups || [];
+      state.originalConcepts = new Map(
+        state.mockups.map((m) => [m.concept.id, {
+          headline: m.concept.headline,
+          subheadline: m.concept.subheadline || "",
+          cta: m.concept.cta,
+          body_copy: m.concept.body_copy || "",
+          visual_prompt: m.concept.visual_prompt,
+        }])
+      );
+      state.logoUrl = p.logo ? `${p.logo.url}?v=${Date.now()}` : null;
+      state.votes = new Map();
+      state.refinePicks = [];
+
+      // Restore form/preview if logo present.
+      if (state.logoUrl) {
+        document.getElementById("logoPreview").innerHTML = `<img src="${state.logoUrl}" alt="">`;
+        document.getElementById("logoPreview").classList.add("has-image");
+        document.getElementById("logoClear").hidden = false;
+      }
+      if (state.research) renderResearch(state.research);
+      if (state.styleGuide) renderStyleGuide(state.styleGuide);
+      if (state.mockups.length) renderCollage(state.mockups);
+
+      // Mark earlier steps done and jump to the right one.
+      ["brief", "research", "style", "collage", "vote", "refine"].forEach((s) => {});
+      const target = pickResumeStep(p);
+      ["brief", "research", "style", "collage", "vote", "refine", "build"].forEach((s) => {
+        if (s === target) return;
+        // anything earlier than target counts as done
+        if (STEPS.indexOf(s) < STEPS.indexOf(target)) doneSteps.add(s);
+      });
+      // unhide research/style/collage views as appropriate
+      if (state.research) {
+        document.getElementById("researchLoader").hidden = true;
+        document.getElementById("researchReport").hidden = false;
+      }
+      if (state.styleGuide) {
+        document.getElementById("styleLoader").hidden = true;
+        document.getElementById("styleView").hidden = false;
+      }
+      go(target);
+      toast(`Resumed "${p.brief.company_name}"`, "ok", 2500);
+    } catch (err) {
+      toast("Could not resume: " + err.message, "err");
+    }
+  }
+
+  function pickResumeStep(p) {
+    if ((p.built_assets || []).length) return "build";
+    if ((p.mockups || []).length) return "vote";
+    if (p.style_guide) return "collage";
+    if (p.research) return "style";
+    return "research";
+  }
+
+  // ---------------------------------------------------------------------
+  // Keyboard help overlay
+  // ---------------------------------------------------------------------
+  const kbdHelp = document.getElementById("kbdHelp");
+  document.getElementById("helpBtn").addEventListener("click", () => { kbdHelp.hidden = false; });
+  kbdHelp.addEventListener("click", (e) => { if (e.target.dataset.close !== undefined) kbdHelp.hidden = true; });
+  window.addEventListener("keydown", (e) => {
+    const tag = (e.target && e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || e.metaKey || e.ctrlKey) return;
+    if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
+      e.preventDefault();
+      kbdHelp.hidden = !kbdHelp.hidden;
+    } else if (e.key === "Escape") {
+      kbdHelp.hidden = true;
+      document.getElementById("previewModal").hidden = true;
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Copy-to-clipboard delegation (for any [data-copy] target)
+  // ---------------------------------------------------------------------
+  document.body.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".copy-btn");
+    if (!btn) return;
+    const target = btn.getAttribute("data-copy");
+    let text = "";
+    if (target === "caption") {
+      const card = btn.closest(".refine-card");
+      text = card?.querySelector('[data-field="caption"]')?.value || "";
+    } else if (target === "hashtags") {
+      const card = btn.closest(".refine-card");
+      text = card?.querySelector('.hashtags')?.textContent || "";
+    } else if (target === "alt") {
+      const card = btn.closest(".refine-card");
+      text = card?.querySelector('.alt')?.textContent.replace(/^Alt:\s*/, "") || "";
+    } else if (btn.dataset.text) {
+      text = btn.dataset.text;
+    }
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.classList.add("is-success");
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = original; btn.classList.remove("is-success"); }, 1200);
+    } catch (_) {
+      toast("Couldn’t copy to clipboard", "err");
+    }
+  });
+
   // Kickoff
   go("brief");
+  refreshCapabilities();
+  refreshRecent();
 })();

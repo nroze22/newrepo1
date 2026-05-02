@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -55,6 +56,83 @@ class SocialStudioService:
 
         self._projects: Dict[str, StudioProject] = {}
         self._lock = threading.Lock()
+        self._save_locks: Dict[str, threading.Lock] = {}
+        self._hydrate_from_disk()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    def _state_path(self, project_id: str) -> Path:
+        return self.asset_dir / project_id / "state.json"
+
+    def _save(self, project: StudioProject) -> None:
+        """Snapshot a project to disk. Best-effort - failures are logged."""
+        path = self._state_path(project.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = self._save_locks.setdefault(project.id, threading.Lock())
+        with lock:
+            try:
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(project.model_dump_json(indent=2), encoding="utf-8")
+                tmp.replace(path)
+            except Exception as exc:
+                logger.warning("Failed to persist project %s: %s", project.id, exc)
+
+    def _hydrate_from_disk(self) -> None:
+        """Reload all persisted projects from disk on startup."""
+        if not self.asset_dir.exists():
+            return
+        for child in self.asset_dir.iterdir():
+            state = child / "state.json"
+            if not state.is_file():
+                continue
+            try:
+                data = json.loads(state.read_text(encoding="utf-8"))
+                project = StudioProject.model_validate(data)
+                self._projects[project.id] = project
+            except Exception as exc:
+                logger.warning("Could not load project state %s: %s", state, exc)
+        if self._projects:
+            logger.info("social_studio: hydrated %d projects from disk", len(self._projects))
+
+    def list_projects(self, limit: int = 20) -> List[Dict[str, object]]:
+        items = []
+        for p in self._projects.values():
+            items.append({
+                "id": p.id,
+                "company": p.brief.company_name,
+                "status": p.status,
+                "created_at": p.created_at.isoformat(),
+                "updated_at": p.updated_at.isoformat(),
+                "mockup_count": len(p.mockups),
+                "built_count": len(p.built_assets),
+            })
+        items.sort(key=lambda x: x["updated_at"], reverse=True)
+        return items[:limit]
+
+    def delete_project(self, project_id: str) -> None:
+        with self._lock:
+            self._projects.pop(project_id, None)
+        import shutil
+        try:
+            shutil.rmtree(self.asset_dir / project_id, ignore_errors=True)
+        except Exception:
+            pass
+
+    def capabilities(self) -> Dict[str, object]:
+        """Report what the studio can actually do right now."""
+        gemini_ready = self.researcher._genai is not None
+        openai_ready = self.mockups._openai is not None
+        writable = os.access(str(self.asset_dir), os.W_OK)
+        return {
+            "openai_image": openai_ready,
+            "openai_image_model": self.mockups.image_model if openai_ready else None,
+            "gemini_text": gemini_ready,
+            "gemini_grounded": gemini_ready,
+            "asset_dir": str(self.asset_dir),
+            "asset_dir_writable": writable,
+            "project_count": len(self._projects),
+        }
 
     # ------------------------------------------------------------------
     # Project lifecycle
@@ -65,6 +143,7 @@ class SocialStudioService:
         with self._lock:
             self._projects[project_id] = project
         (self.asset_dir / project_id).mkdir(parents=True, exist_ok=True)
+        self._save(project)
         return project
 
     def get_project(self, project_id: str) -> Optional[StudioProject]:
@@ -72,6 +151,7 @@ class SocialStudioService:
 
     def _touch(self, project: StudioProject) -> None:
         project.updated_at = datetime.utcnow()
+        self._save(project)
 
     # ------------------------------------------------------------------
     # Pipeline stages
@@ -102,12 +182,26 @@ class SocialStudioService:
         count: int = 16,
         platforms: Optional[List[Platform]] = None,
     ) -> List[MockupAsset]:
+        assets: List[MockupAsset] = []
+        async for event in self.generate_mockups_streaming(project_id, count, platforms):
+            if event.get("type") == "tile":
+                assets.append(event["asset"])
+        return assets
+
+    async def generate_mockups_streaming(
+        self,
+        project_id: str,
+        count: int = 16,
+        platforms: Optional[List[Platform]] = None,
+    ):
         project = self._require(project_id)
         if project.style_guide is None:
             await self.run_style_guide(project_id)
         project.status = "generating_mockups"
+        project.mockups = []
         self._touch(project)
 
+        yield {"type": "status", "status": "planning"}
         concepts = await self.mockups.plan_concepts(
             project.brief,
             project.research,
@@ -115,11 +209,17 @@ class SocialStudioService:
             count=count,
             platforms=platforms,
         )
-        assets = await self.mockups.render_mockups(project_id, concepts, project.style_guide)
-        project.mockups = assets
+
+        async for event in self.mockups.render_mockups_streaming(
+            project_id, concepts, project.style_guide
+        ):
+            if event.get("type") == "tile":
+                project.mockups.append(event["asset"])
+                self._touch(project)
+            yield event
+
         project.status = "mockups_ready"
         self._touch(project)
-        return assets
 
     def apply_votes(self, project_id: str, votes: List[Vote]) -> List[MockupAsset]:
         project = self._require(project_id)
